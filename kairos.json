@@ -1,0 +1,10 @@
+{
+  "kairos" : {
+    "username" : "root",
+    "logfile"  : "kairosdp.log"
+  },
+  "kairos-repo": {
+    "repo-uri" : "mongodb://10.61.105.13:27017",
+    "db-name"  : "kairos_repo"
+  }
+}

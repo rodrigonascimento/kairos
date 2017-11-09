@@ -1,0 +1,300 @@
+#!/usr/bin/env python
+
+# -- Summary --------------------------------------------------------------------------------------------------------
+#
+#  Author  : logwriter (Rodrigo Nascimento)
+#  Version : 0.1
+#  Date    : October, 2017
+#
+# -- Why Kairos? ----------------------------------------------------------------------------------------------------
+#  In the New Testament, "Kairos" refers to an opportune time, a ~moment~ or a ~season~ such as ~harvest time~
+#  An orchastrated backup operation for a MongoDB database using snapshots has to happen in the right moment, it has
+#  to be quick and crash consistent without interfering with the database operations.
+# -------------------------------------------------------------------------------------------------------------------
+
+import sys
+import os
+import argparse
+import json
+import pymongo
+import logging
+from time import time, sleep, strftime
+
+sys.path.append(os.path.join(os.path.dirname(__file__)) + '/lib')
+from subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup
+
+def cmdargs():
+    cmdopts = argparse.ArgumentParser(description='NetApp Data Protection for MongoDB')
+    cmdopts.add_argument('--config', type=str, default='kairos.json', help='Kairos configuration file')
+    subcmd = cmdopts.add_subparsers()
+
+    mdb_cluster = subcmd.add_parser('mongodb')
+    mdb_cluster.add_argument('--add', action='store_true', help='Add a MongoDB Cluster for Data Protection')
+    mdb_cluster.add_argument('--remove', action='store_true', help='Remove a MongoDB Cluster for Data Protection')
+    mdb_cluster.add_argument('--list', action='store_true', help='List MongoDB Clusters protected by Kairos')
+    mdb_cluster.add_argument('--cluster-name', type=str, help='MongoDB Cluster name')
+    mdb_cluster.add_argument('--uri', type=str, help='MongoDB URI connection string')
+    mdb_cluster.add_argument('--auth', choices=['on', 'off'], default='off', help='MongoDB authentication enabled/disabled')
+    mdb_cluster.add_argument('--auth-db', type=str, help='MongoDB authentication database')
+    mdb_cluster.add_argument('--auth-user', type=str, help='MongoDB username')
+    mdb_cluster.add_argument('--auth-pass', type=str, help='MongoDB password')
+    mdb_cluster.add_argument('--mongod-conf', type=str, default='/etc/mongod.conf', help='MongoDB configuration file path')
+    mdb_cluster.add_argument('--netapp-systems', dest='ntapsys', nargs='+', help='NetApp system(s) where your MongoDB '
+                                                                                'is deployed')
+    mdb_cluster.set_defaults(which='mongodb')
+
+    ntap_system = subcmd.add_parser('netapp')
+    ntap_system.add_argument('--add', action='store_true', help='Add a NetApp System')
+    ntap_system.add_argument('--remove', action='store_true', help='Remove a NetApp System')
+    ntap_system.add_argument('--list', action='store_true', help='List NetApp Systems')
+    ntap_system.add_argument('--netapp-ip', type=str, help='NetApp Cluster IP address')
+    ntap_system.add_argument('--username', type=str, help='NetApp user (admin, vsadmin)')
+    ntap_system.add_argument('--password', type=str, help='NetApp user password')
+    ntap_system.add_argument('--svm-name', type=str, help='NetApp SVM name')
+    ntap_system.set_defaults(which='netapp')
+
+    host_member = subcmd.add_parser('host')
+    host_member.add_argument('--add', action='store_true', help='Add a host to be used as a ReplicaSet member')
+    host_member.add_argument('--remove', action='store_true', help='Remove a host')
+    host_member.add_argument('--list', action='store_true', help='List hosts')
+    host_member.add_argument('--hostname', type=str, help='Hostname or IP Address')
+    host_member.add_argument('--protocol', choices=['fcp', 'iscsi'], help='Protocol')
+    host_member.add_argument('--host-port-id', type=str, help='Host WWPN or IQN')
+    host_member.set_defaults(which='host')
+
+    backup = subcmd.add_parser('backup')
+    backup.add_argument('--create', action='store_true', help='Create a backup of a MongoDB cluster')
+    backup.add_argument('--delete', action='store_true', help='Delete a backup of a MongoDB cluster')
+    backup.add_argument('--list-all', action='store_true', help='List all backups of a MongoDB cluster')
+    backup.add_argument('--search-for-db', type=str, help='Search for backups containing databases within a keyword')
+    backup.add_argument('--search-for-collection', type=str, help='Search for backups containing collections '
+                                                                  'within a keyword')
+    backup.add_argument('--cluster-name', type=str, help='MongoDB cluster name')
+    backup.add_argument('--backup-name', type=str, help='Backup name')
+    backup.add_argument('--retention', type=str, help='Backup retention [ 1v(ersion), 1d(ay), 1w(eek), etc ]')
+    backup.set_defaults(which='backup')
+
+    recovery = subcmd.add_parser('recovery')
+    recovery.add_argument('--full-restore', action='store_true', help='Restore a database')
+    recovery.add_argument('--point-in-time', action='store_true', help='Recovery a database to a specific point '
+                                                                       'in time')
+    recovery.add_argument('--backup-name', type=str, help='Backup name')
+    recovery.add_argument('--date-time', type=str, help='Date & Time to recovery a database')
+    recovery.set_defaults(which='recovery')
+
+    clone = subcmd.add_parser('clone')
+    clone.add_argument('--create', action='store_true', help='Create a clone')
+    clone.add_argument('--delete', action='store_true', help='Delete a clone')
+    clone.add_argument('--list', action='store_true', help='List clones')
+    clone.add_argument('--clone-name', type=str, help='Clone name')
+    clone.add_argument('--backup-name', type=str, help='Backup name to be used as the baseline for your clone')
+    clone.add_argument('--date-time', type=str, help='Date & Time for point in time recovery')
+    clone.add_argument('--hosts', dest='hostsDest', nargs='+', help='Hosts where your clone will be mounted')
+    clone.set_defaults(which='clone')
+
+    oplogtailer = subcmd.add_parser('oplogtailer')
+    oplogtailer.add_argument('--start', action='store_true', help='Start an oplog tailer for a MongoDB Cluster')
+    oplogtailer.add_argument('--stop', action='store_true', help='Stop an oplog tailer')
+    oplogtailer.add_argument('--list', action='store_true', help='List oplog tailers by MongoDB Cluster')
+    oplogtailer.add_argument('--mongodb-cluster', type=str, help='MongoDB cluster name')
+    oplogtailer.set_defaults(which='oplogtailer')
+
+    return vars(cmdopts.parse_args())
+
+
+def load_config_file(config_file=None):
+    with open(config_file, 'r') as cfgfile:
+        kconfig = json.load(cfgfile)
+        return kconfig
+
+
+def main():
+    # -- Parsing CLI arguments
+    cliargs = cmdargs()
+
+    # -- Parsing kairos' config file
+    kcfg = load_config_file(cliargs['config'])
+
+    # -- Preparing logger
+    logging.basicConfig(format='%(asctime)s :: %(levelname)s :: %(message)s',
+                        level=logging.INFO,
+                        handlers=[
+                            logging.FileHandler(filename='kairos_dp.log'),
+                            logging.StreamHandler()
+                        ])
+
+    # -- Opening a session with the repository database
+    try:
+        dbsession = pymongo.MongoClient(kcfg['kairos-repo']['repo-uri'], connect=True)
+        kairos_repo = dbsession[kcfg['kairos-repo']['db-name']]
+    except:
+        logging.error('Connection to the database repository failed.')
+        sys.exit(1)
+
+    # -- If subcommand is mongodb
+    if cliargs['which'] == 'mongodb':
+        mdb_spec = dict()
+        mdb_spec['cluster-name'] = cliargs['cluster_name']
+        mdb_spec['mongodb-uri'] = cliargs['uri']
+        mdb_spec['mongodb-auth'] = cliargs['auth']
+        mdb_spec['mongodb-auth-db'] = cliargs['auth_db']
+        mdb_spec['mongodb-auth-user'] = cliargs['auth_user']
+        mdb_spec['mongodb-auth-pass'] = cliargs['auth_pass']
+        mdb_spec['mongodb-mongod-conf'] = cliargs['mongod_conf']
+        mdb_spec['netapp-systems'] = cliargs['ntapsys']
+
+        mongo = SubCmdMongodb(mdb_spec)
+
+        if cliargs['add']:
+            if (mdb_spec['cluster-name'] is None) or (mdb_spec['mongodb-uri'] is None) or (
+                mdb_spec['netapp-systems'] is None):
+                logging.error('cluster-name, mongodb-uri and netapp-systems are required to add a new mongodb cluster.')
+                sys.exit(1)
+            else:
+                ntapsystems = kairos_repo['ntapsystems']
+                for ntapsys in mdb_spec['netapp-systems']:
+                    result = ntapsystems.find_one({'netapp-ip': ntapsys})
+                    if result is None:
+                        logging.error('NetApp system ' + ntapsys + ' does not exist in the catalog.')
+                        sys.exit(1)
+                mongo.add(kairos_repo, 'mdbclusters')
+                sys.exit(0)
+
+        if cliargs['remove']:
+            if mdb_spec['cluster-name'] is not None:
+                #TODO: Checking for dependency on backups and clones before to remove a MongoDB cluster.
+                mongo.remove(kairos_repo, 'mdbclusters')
+                sys.exit(0)
+            else:
+                logging.error('cluster-name required to remove a MongoDB cluster.')
+                sys.exit(1)
+
+        if cliargs['list']:
+            list_all = mongo.list(kairos_repo, 'mdbclusters')
+            for doc in list_all:
+                if doc['mongodb-auth'] == 'off':
+                    print '{} \t {} \t {} \t {}'.format(doc['cluster-name'], doc['mongodb-uri'],
+                                                            doc['mongodb-auth'],
+                                                            ' '.join([x for x in doc['netapp-systems']]))
+                elif doc['mongodb-auth'] == 'on':
+                    print '{} \t\t {} \t {} \t {} \t {} \t {} \t {}'.format(doc['cluster-name'],
+                                                                                    doc['mongodb-uri'],
+                                                                                    doc['mongodb-auth'],
+                                                                                    doc['mongodb-auth-db'],
+                                                                                    doc['mongodb-auth-user'],
+                                                                                    doc['mongodb-auth-pass'],
+                                                                                    ' '.join([x for x in doc['netapp-systems']]))
+            sys.exit(0)
+
+    # -- If subcommand is netapp
+    if cliargs['which'] == 'netapp':
+        ntap_spec = dict()
+        ntap_spec['netapp-ip'] = cliargs['netapp_ip']
+        ntap_spec['username'] = cliargs['username']
+        ntap_spec['password'] = cliargs['password']
+        ntap_spec['svm-name'] = cliargs['svm_name']
+
+        netapp = SubCmdNetapp(ntap_spec)
+
+        if cliargs['add']:
+            if (ntap_spec['netapp-ip'] is None) or (ntap_spec['username'] is None) or (ntap_spec['password'] is None):
+                logging.error('netapp-ip, username and password are required to add a new system.')
+                sys.exit(1)
+            else:
+                netapp.add(kairos_repo, 'ntapsystems')
+                sys.exit(0)
+
+        if cliargs['remove']:
+            if ntap_spec['netapp-ip'] is not None:
+                #TODO: Check dependency on mdb_clusters, backups and clones before deleting a NetApp system
+                deleted_count = netapp.remove(kairos_repo, 'ntapsystems')
+                if deleted_count != 0:
+                    logging.info('NetApp system ' + ntap_spec['netapp-ip'] + ' has been removed.')
+                    sys.exit(0)
+                else:
+                    logging.error('NetApp system ' + ntap_spec['netapp-ip'] + ' not found.')
+                    sys.exit(1)
+            else:
+                logging.error('netapp-ip is required to remove a NetApp system.')
+                sys.exit(1)
+
+        if cliargs['list']:
+            list_all = netapp.list(kairos_repo, 'ntapsystems')
+            print 'NetApp System \t Username \t Password \t SVM'
+            for doc in list_all:
+                if 'svm-name' not in doc.keys():
+                    print '{} \t {} \t\t {} \t {}'.format(doc['netapp-ip'], doc['username'], doc['password'], '---')
+                else:
+                    print '{} \t {} \t\t {} \t {}'.format(doc['netapp-ip'], doc['username'], doc['password'], doc['svm-name'])
+            sys.exit(0)
+
+    # -- If subcommand is host
+    if cliargs['which'] == 'host':
+        pass
+
+    # -- If subcommand is backup
+    if cliargs['which'] == 'backup':
+        backup_spec = dict()
+        backup_spec['cluster-name'] = cliargs['cluster_name']
+        backup_spec['backup-name'] = cliargs['backup_name']
+        backup_spec['retention'] = cliargs['retention']
+        backup_spec['username'] = kcfg['kairos']['username']
+
+        backup = SubCmdBackup(backup_spec)
+
+        if cliargs['create']:
+            if (backup_spec['cluster-name'] is None) or (backup_spec['backup-name'] is None) or (
+                backup_spec['retention'] is None):
+                logging.error('cluster-name is required to create a backup.')
+                sys.exit(1)
+            else:
+                backup.create(kairos_repo)
+                sys.exit(0)
+
+        if cliargs['list_all']:
+            if backup_spec['cluster-name'] is None:
+                logging.error('You must enter a cluster-name to list all the backups of a given MongoDB cluster.')
+                sys.exit(1)
+            else:
+                backup.list_all(kairos_repo)
+                sys.exit(0)
+
+        if cliargs['search_for_db']:
+            if backup_spec['cluster-name'] is None:
+                logging.error('You must enter a cluster-name to list all the backups of a given MongoDB cluster.')
+                sys.exit(1)
+            else:
+                backup.search_for_db(kairos_repo, cliargs['search_for_db'])
+                sys.exit(0)
+
+        if cliargs['search_for_collection']:
+            if backup_spec['cluster-name'] is None:
+                logging.error('You must enter a cluster-name to list all the backups of a given MongoDB cluster.')
+                sys.exit(1)
+            else:
+                backup.search_for_collection(kairos_repo, cliargs['search_for_collection'])
+                sys.exit(0)
+
+        if cliargs['delete']:
+            if (backup_spec['cluster-name'] is None) or (backup_spec['backup-name'] is None):
+                logging.error('You must enter a cluster-name and a backup-name to delete a backup.')
+                sys.exit(1)
+            else:
+                backup.delete(kairos_repo)
+                sys.exit(0)
+
+    # -- If subcommand is recovery
+    if cliargs['which'] == 'recovery':
+        pass
+
+    # -- If subcommand is clone
+    if cliargs['which'] == 'clone':
+        pass
+
+    # -- If subcommand is oplogtailer
+    if cliargs['which'] == 'oplogtailer':
+        pass
+
+
+if __name__ == '__main__':
+    main()
