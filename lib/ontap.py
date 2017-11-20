@@ -275,6 +275,16 @@ class Lun:
 
         return results
 
+    def unmapping(self, svm):
+        results = []
+        for igroup in self.igroup_name:
+            api_call = NaElement('lun-unmap')
+            api_call.child_add_string('path', self.path)
+            api_call.child_add_string('initiator-group', igroup)
+
+            output = svm.run_command(api_call)
+            results.append((output.results_status(), output.sprintf(), self.path, igroup))
+
     def get_igroup_by_lunid(self, svm):
         api_call = NaElement('igroup-get-iter')
         api_call_query = NaElement('query')
@@ -350,6 +360,14 @@ class Snapshot:
         output = svm.run_command(api_call)
         return output.results_status(), output.sprintf()
 
+    def restore(self, svm):
+        api_call = NaElement('snapshot-restore-volume')
+        api_call.child_add_string('volume', self.volume)
+        api_call.child_add_string('snapshot', self.snapname)
+        api_call.child_add_string('preserve-lun-ids', True)
+
+        output = svm.run_command(api_call)
+        return output.results_status(), output.sprintf()
 
 class Clone:
     def __init__(self, clone_spec):

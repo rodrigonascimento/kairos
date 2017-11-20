@@ -78,13 +78,13 @@ class MongoDBCluster:
                 doc['stateStr'] = member['stateStr']
                 cluster_topology['members'].append(doc)
                 if member['stateStr'] == 'PRIMARY':
-                    cluster_topology['db_n_colls'] = list()
-                    cluster_topology['db_n_colls'].append(self.get_db_collections())
+                    cluster_topology['databases'] = self.get_databases()
+                    cluster_topology['collections'] = self.get_collections()
+
             return cluster_topology
         elif cluster_type == 'sharded':
             cluster_topology['config_servers'] = list()
             cluster_topology['shards'] = list()
-            cluster_topology['db_n_colls'] = list()
 
             # -- Getting config server replica set info
             for member in self.conn.admin.command("replSetGetStatus")['members']:
@@ -103,25 +103,31 @@ class MongoDBCluster:
                 doc = dict()
                 doc['shard_name'] = shard['_id']
                 doc['shard_members'] = shard_replSet.get_topology()['members']
-                for member in doc['shard_members']:
-                    if member['stateStr'] == 'PRIMARY':
-                        cluster_topology['db_n_colls'].append(shard_replSet.get_db_collections())
-
+                doc['databases'] = shard_replSet.get_databases()
+                doc['collections'] = shard_replSet.get_collections()
                 cluster_topology['shards'].append(doc)
             return cluster_topology
 
-    def get_db_collections(self):
-        db_list = self.conn.admin.command("listDatabases")['databases']
-        db_n_coll = dict()
-        for db in db_list:
+    def get_databases(self):
+        dbs = self.conn.admin.command("listDatabases")['databases']
+        db_list = list()
+        for db in dbs:
+            if (db['name'] == 'config') or (db['name'] == 'admin') or (db['name'] == 'local'):
+                continue
+            else:
+                db_list.append(db['name'])
+        return db_list
+
+    def get_collections(self):
+        dbs = self.conn.admin.command("listDatabases")['databases']
+        coll_list = list()
+        for db in dbs:
             if (db['name'] == 'config') or (db['name'] == 'admin') or (db['name'] == 'local'):
                 continue
             else:
                 collection_list = database.Database(client=self.conn, name=db['name'])
-                db_n_coll['setname'] = self.conn.admin.command("replSetGetStatus")['set']
-                db_n_coll['dbname'] = db['name']
-                db_n_coll['collections'] = collection_list.collection_names()
-
-        return db_n_coll
+                for collection in collection_list.collection_names():
+                    coll_list.append(collection)
+        return coll_list
 
 

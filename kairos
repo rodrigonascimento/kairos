@@ -9,7 +9,7 @@
 # -- Why Kairos? ----------------------------------------------------------------------------------------------------
 #  In the New Testament, "Kairos" refers to an opportune time, a ~moment~ or a ~season~ such as ~harvest time~
 #  An orchastrated backup operation for a MongoDB database using snapshots has to happen in the right moment, it has
-#  to be quick and crash consistent without interfering with the database operations.
+#  to be quick and crash consistent without interfering with database operations.
 # -------------------------------------------------------------------------------------------------------------------
 
 import sys
@@ -53,19 +53,10 @@ def cmdargs():
     ntap_system.add_argument('--svm-name', type=str, help='NetApp SVM name')
     ntap_system.set_defaults(which='netapp')
 
-    host_member = subcmd.add_parser('host')
-    host_member.add_argument('--add', action='store_true', help='Add a host to be used as a ReplicaSet member')
-    host_member.add_argument('--remove', action='store_true', help='Remove a host')
-    host_member.add_argument('--list', action='store_true', help='List hosts')
-    host_member.add_argument('--hostname', type=str, help='Hostname or IP Address')
-    host_member.add_argument('--protocol', choices=['fcp', 'iscsi'], help='Protocol')
-    host_member.add_argument('--host-port-id', type=str, help='Host WWPN or IQN')
-    host_member.set_defaults(which='host')
-
     backup = subcmd.add_parser('backup')
     backup.add_argument('--create', action='store_true', help='Create a backup of a MongoDB cluster')
     backup.add_argument('--delete', action='store_true', help='Delete a backup of a MongoDB cluster')
-    backup.add_argument('--list-all', action='store_true', help='List all backups of a MongoDB cluster')
+    backup.add_argument('--list', action='store_true', help='List all backups of a MongoDB cluster')
     backup.add_argument('--search-for-db', type=str, help='Search for backups containing databases within a keyword')
     backup.add_argument('--search-for-collection', type=str, help='Search for backups containing collections '
                                                                   'within a keyword')
@@ -75,11 +66,9 @@ def cmdargs():
     backup.set_defaults(which='backup')
 
     recovery = subcmd.add_parser('recovery')
-    recovery.add_argument('--full-restore', action='store_true', help='Restore a database')
-    recovery.add_argument('--point-in-time', action='store_true', help='Recovery a database to a specific point '
-                                                                       'in time')
     recovery.add_argument('--backup-name', type=str, help='Backup name')
-    recovery.add_argument('--date-time', type=str, help='Date & Time to recovery a database')
+    recovery.add_argument('--cluster-name', type=str, help='MongoDB Cluster name')
+    recovery.add_argument('--full-restore', action='store_true', help='Restore a MongoDB cluster')
     recovery.set_defaults(which='recovery')
 
     clone = subcmd.add_parser('clone')
@@ -89,7 +78,7 @@ def cmdargs():
     clone.add_argument('--clone-name', type=str, help='Clone name')
     clone.add_argument('--backup-name', type=str, help='Backup name to be used as the baseline for your clone')
     clone.add_argument('--date-time', type=str, help='Date & Time for point in time recovery')
-    clone.add_argument('--hosts', dest='hostsDest', nargs='+', help='Hosts where your clone will be mounted')
+    clone.add_argument('--hosts-cfg', type=str, help='Config file about hosts where your clone will be mounted')
     clone.set_defaults(which='clone')
 
     oplogtailer = subcmd.add_parser('oplogtailer')
@@ -228,10 +217,6 @@ def main():
                     print '{} \t {} \t\t {} \t {}'.format(doc['netapp-ip'], doc['username'], doc['password'], doc['svm-name'])
             sys.exit(0)
 
-    # -- If subcommand is host
-    if cliargs['which'] == 'host':
-        pass
-
     # -- If subcommand is backup
     if cliargs['which'] == 'backup':
         backup_spec = dict()
@@ -251,7 +236,7 @@ def main():
                 backup.create(kairos_repo)
                 sys.exit(0)
 
-        if cliargs['list_all']:
+        if cliargs['list']:
             if backup_spec['cluster-name'] is None:
                 logging.error('You must enter a cluster-name to list all the backups of a given MongoDB cluster.')
                 sys.exit(1)

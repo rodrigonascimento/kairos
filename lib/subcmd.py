@@ -4,7 +4,8 @@ import logging
 import xml.dom.minidom
 from pymongo import MongoClient, errors
 from sys import exit
-from time import sleep, time, strftime, localtime
+from time import sleep, time
+from datetime import datetime, timedelta
 from ontap import ClusterSession, Snapshot
 from mongodbcluster import MongoDBCluster
 from host_conn import HostConn
@@ -17,7 +18,6 @@ class SubCmdMongodb:
                 if mdbcluster_spec[mdb_key] is None:
                     mdbcluster_spec.pop(mdb_key)
 
-            self.mdb_spec = dict()
             self.mdb_spec = mdbcluster_spec
 
     def add(self, kdb_session, kdb_collection):
@@ -61,7 +61,6 @@ class SubCmdNetapp:
                 if ntapsys_spec[ntapsys_key] is None:
                     ntapsys_spec.pop(ntapsys_key)
 
-            self.netappsys = dict()
             self.netappsys = ntapsys_spec
 
     def add(self, kdb_session, kdb_collection):
@@ -105,7 +104,6 @@ class SubCmdNetapp:
 class SubCmdBackup:
     def __init__(self, bkp_spec=None):
         if bkp_spec is not None:
-            self.backup = dict()
             self.backup = bkp_spec
 
     def create(self, kdb_session):
@@ -116,7 +114,6 @@ class SubCmdBackup:
             if cluster_info is None:
                 logging.error('MongoDB cluster ' + self.backup['cluster-name'] + ' not found.')
                 exit(1)
-
             logging.info('Found ' + self.backup['cluster-name'] + ' on Kairos repository.')
         except errors.ConnectionFailure or errors.CursorNotFound, e:
             logging.error(e.message)
@@ -163,15 +160,22 @@ class SubCmdBackup:
                     elif shard_member['stateStr'] == 'SECONDARY':
                         secondaries_list.append(shard_member['name'][:shard_member['name'].find(':')])
 
+        data_members = list()
+        for sec in secondaries_list:
+            data_members.append(sec)
+
+        for pri in primaries_list:
+            data_members.append(pri)
+
         # -- Working with primaries_list to get the volumes used by each primary -- #
         svm_n_vols_layout = list()
 
         # --- Creating an array to store host_conn objects
-        ssh2pri = list()
-        for primary in primaries_list:
-            ssh2pri.append(HostConn(ipaddr=primary, username=self.backup['username']))
+        ssh2host = list()
+        for host in data_members:
+            ssh2host.append(HostConn(ipaddr=host, username=self.backup['username']))
 
-        for host in ssh2pri:
+        for host in ssh2host:
             svm_n_vols_layout.append(host.get_storage_layout(cluster_info['mongodb-mongod-conf']))
             host.close()
 
@@ -220,23 +224,14 @@ class SubCmdBackup:
         if topology['cluster_type'] == 'sharded':
             mdbcluster.start_balancer()
 
-        # -- Primary snapshots taken, let's grab info from secondaries
-        ssh2sec = list()
-        for secondary in secondaries_list:
-            ssh2sec.append(HostConn(ipaddr=secondary, username=self.backup['username']))
-
-        for host in ssh2sec:
-            svm_n_vols_layout.append(host.get_storage_layout(cluster_info['mongodb-mongod-conf']))
-            host.close()
-
         # -- Saving backup metadata to the repository database
         bkp_metadata = dict()
         bkp_metadata['backup_name'] = self.backup['backup-name']
         bkp_metadata['cluster_name'] = self.backup['cluster-name']
-        bkp_metadata['retention'] = self.backup['retention']
-        bkp_metadata['created_at'] = time()
+        bkp_metadata['created_at'] = datetime.now()
         bkp_metadata['mongo_topology'] = topology
         bkp_metadata['svms_n_vols'] = svm_n_vols_layout
+        bkp_metadata['retention'] = self._calc_retention(self.backup['retention'], bkp_metadata['created_at'])
         kdb_backups = kdb_session['backups']
         kdb_backups.insert_one(bkp_metadata)
 
@@ -305,33 +300,42 @@ class SubCmdBackup:
         result = kdb_bkps.find()
         print '{:30} \t {:30} {:30}'.format('Backup Name', 'Created At', 'Retention')
         for bkp in result:
-            print '{:30} \t {:30} {:30}'.format(bkp['backup_name'],
-                                                      strftime('%c %Z', localtime(bkp['created_at'])),
-                                                      bkp['retention']
-                                                      )
+            print '{:30} \t {:30} {:30}'.format(bkp['backup_name'], bkp['created_at'].strftime('%c %Z'),
+                                                bkp['retention'].strftime('%c %Z'))
 
     def search_for_db(self, kdb_session, keyword):
         kdb_bkps = kdb_session['backups']
-        result = kdb_bkps.find({'mongo_topology.db_n_colls.dbname': keyword})
+        result = kdb_bkps.find({'mongo_topology.shards.databases': keyword})
         print '{:30} \t {:30} {:30}'.format('Backup Name', 'Created At', 'Retention')
         for bkp in result:
             print '{:30} \t {:30} {:30}'.format(bkp['backup_name'],
-                                                strftime('%c %Z', localtime(bkp['created_at'])),
-                                                bkp['retention']
+                                                bkp['created_at'].strftime('%c %Z'),
+                                                bkp['retention'].strftime('%c %Z')
                                                 )
 
     def search_for_collection(self, kdb_session, keyword):
         kdb_bkps = kdb_session['backups']
-        result = kdb_bkps.find({'mongo_topology.db_n_colls.collections': keyword})
+        result = kdb_bkps.find({'mongo_topology.shards.collections': keyword})
         print '{:30} \t {:30} {:30}'.format('Backup Name', 'Created At', 'Retention')
         for bkp in result:
             print '{:30} \t {:30} {:30}'.format(bkp['backup_name'],
-                                                strftime('%c %Z', localtime(bkp['created_at'])),
-                                                bkp['retention']
+                                                bkp['created_at'].strftime('%c %Z'),
+                                                bkp['retention'].strftime('%c %Z')
                                                 )
 
+    def _calc_retention(self, retention, created_at):
+        unit = retention[len(retention)-1:]
+        value = retention[:-1]
+        if unit == 'm':
+            return created_at + timedelta(minutes=int(value))
+        elif unit == 'h':
+            return created_at + timedelta(hours=int(value))
+        elif unit == 'd':
+            return created_at + timedelta(days=int(value))
+        elif unit == 'w':
+            return created_at + timedelta(weeks=int(value))
 
-class SubCmdRestore:
+class SubCmdRecovery:
     def __init__(self):
         pass
 
