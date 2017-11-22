@@ -21,7 +21,7 @@ import logging
 from time import time, sleep, strftime
 
 sys.path.append(os.path.join(os.path.dirname(__file__)) + '/lib')
-from subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup
+from subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup, SubCmdRecovery
 
 def cmdargs():
     cmdopts = argparse.ArgumentParser(description='NetApp Data Protection for MongoDB')
@@ -62,7 +62,7 @@ def cmdargs():
                                                                   'within a keyword')
     backup.add_argument('--cluster-name', type=str, help='MongoDB cluster name')
     backup.add_argument('--backup-name', type=str, help='Backup name')
-    backup.add_argument('--retention', type=str, help='Backup retention [ 1v(ersion), 1d(ay), 1w(eek), etc ]')
+    backup.add_argument('--retention', type=str, help='Backup retention [ 15m(in), 1h(our), 1d(ay), 1w(eek) ]')
     backup.set_defaults(which='backup')
 
     recovery = subcmd.add_parser('recovery')
@@ -270,7 +270,20 @@ def main():
 
     # -- If subcommand is recovery
     if cliargs['which'] == 'recovery':
-        pass
+        restore_spec = dict()
+        restore_spec['backup-name'] = cliargs['backup_name']
+        restore_spec['cluster-name'] = cliargs['cluster_name']
+        restore_spec['username'] = kcfg['kairos']['username']
+
+        recovery = SubCmdRecovery(restore_spec)
+
+        if cliargs['full_restore']:
+            if (restore_spec['cluster-name'] is None) or (restore_spec['backup-name'] is None):
+                logging.error('You must enter a cluster-name and a backup-name to be able to trigger a restore.')
+                sys.exit(1)
+            else:
+                recovery.restore(kairos_repo)
+                sys.exit(0)
 
     # -- If subcommand is clone
     if cliargs['which'] == 'clone':

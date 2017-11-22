@@ -129,5 +129,3 @@ class MongoDBCluster:
                 for collection in collection_list.collection_names():
                     coll_list.append(collection)
         return coll_list
-
-

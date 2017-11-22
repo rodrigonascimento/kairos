@@ -68,6 +68,7 @@ class HostConn:
         result_fs = self.run_command('mount | grep ' + mdb_dbpath)
         if result_fs[1] == 0:
             mdb_device = result_fs[0].split()[0]
+            fs_type = result_fs[0].split()[4]
         else:
             logging.error('Backup failed! Could not get dbpath device from host ' + self.ipaddr)
             exit(1)
@@ -112,16 +113,59 @@ class HostConn:
             pass
 
         doc = dict()
-        doc['hostname_ip'] = self.ipaddr
         doc['volume_topology'] = list()
+
         for svm_vol in svm_n_vol:
             doc['volume_topology'].append(svm_vol)
+
+        doc['mountpoint'] = mdb_dbpath
+        doc['fs_type'] = fs_type
         if result_lv[1] == 0:
-            doc['hostside_info'] = dict()
-            doc['hostside_info']['lvm_vgname'] = mdb_vgname
-            doc['hostside_info']['mdb_device'] = mdb_device
+            doc['lvm_vgname'] = mdb_vgname
+            doc['mdb_device'] = mdb_device
 
         return doc
+
+    def _get_service_manager(self):
+        result = self.run_command('which systemctl')
+        if result[1] == 0:
+            return 'systemctl'
+        else:
+            return 'service'
+
+    def stop_service(self, service_name=None):
+        svcmgmr = self._get_service_manager()
+        if svcmgmr == 'systemctl':
+            result_cmd = self.run_command('systemctl stop ' + service_name)
+        else:
+            result_cmd = self.run_command('service ' + service_name + ' stop')
+
+        return result_cmd
+
+    def start_service(self, service_name=None):
+        svcmgmr = self._get_service_manager()
+        if svcmgmr == 'systemctl':
+            result_cmd = self.run_command('systemctl start ' + service_name)
+        else:
+            result_cmd = self.run_command('service ' + service_name + ' start')
+
+        return result_cmd
+
+    def disable_vg(self, vg_name=None):
+        result_cmd = self.run_command('vgchange -an ' + vg_name)
+        return result_cmd
+
+    def enable_vg(self, vg_name=None):
+        result_cmd = self.run_command('vgchange -ay ' + vg_name)
+        return result_cmd
+
+    def umount_fs(self, fs_mountpoint=None):
+        result_cmd = self.run_command('umount -f ' + fs_mountpoint)
+        return result_cmd
+
+    def mount_fs(self, fs_mountpoint=None, fs_type=None, device=None):
+        result_cmd = self.run_command('mount -t ' + fs_type + ' ' + device + ' ' + fs_mountpoint)
+        return result_cmd
 
     def close(self):
         self.ssh_conn.close()

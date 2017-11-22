@@ -128,93 +128,93 @@ class SubCmdBackup:
         topology = mdbcluster.get_topology()
         logging.info(self.backup['cluster-name'] + ' is a ' + topology['cluster_type'] + ' cluster.')
 
-        # -- Getting a list of primaries across the cluster
-        primaries_list = list()
-
-        # -- Getting a list of secondaries across the cluster
-        secondaries_list = list()
-
         if topology['cluster_type'] == 'replSet':
             for rs_member in topology['members']:
-                if rs_member['stateStr'] == 'PRIMARY':
-                    primaries_list.append(rs_member['name'][:rs_member['name'].find(':')])
-                    logging.info(rs_member['name'][:rs_member['name'].find(':')] + ' server is the current primary member')
-                elif rs_member['stateStr'] == 'SECONDARY':
-                    secondaries_list.append(rs_member['name'][:rs_member['name'].find(':')])
+                if rs_member['stateStr'] == 'PRIMARY' or rs_member['stateStr'] == 'SECONDARY':
+                    host = HostConn(ipaddr=rs_member['name'].split(':')[0], username=self.backup['username'])
+                    rs_member['storage_info'] = host.get_storage_layout(cluster_info['mongodb-mongod-conf'])
+                    host.close()
+                    logging('Collecting info about host {}'.format(rs_member['name'].split(':')[0]))
 
         elif topology['cluster_type'] == 'sharded':
             for cs_member in topology['config_servers']:
-                if cs_member['stateStr'] == 'PRIMARY':
-                    primaries_list.append(cs_member['name'][:cs_member['name'].find(':')])
-                    logging.info(cs_member['name'][:cs_member['name'].find(':')] + ' server is the current CSRS '
-                                                                                    'primary member.')
-                elif cs_member['stateStr'] == 'SECONDARY':
-                    secondaries_list.append(cs_member['name'][:cs_member['name'].find(':')])
+                if cs_member['stateStr'] == 'PRIMARY' or cs_member['stateStr'] == 'SECONDARY':
+                    host = HostConn(ipaddr=cs_member['name'].split(':')[0], username=self.backup['username'])
+                    cs_member['storage_info'] = host.get_storage_layout(cluster_info['mongodb-mongod-conf'])
+                    host.close()
+                    logging.info('Collecting info about config server {}'.format(cs_member['name'].split(':')[0]))
+            for shard_replset in topology['shards']:
+                for shard_member in shard_replset['shard_members']:
+                    if shard_member['stateStr'] == 'PRIMARY' or shard_member['stateStr'] == 'SECONDARY':
+                        host = HostConn(ipaddr=shard_member['name'].split(':')[0], username=self.backup['username'])
+                        shard_member['storage_info'] = host.get_storage_layout(cluster_info['mongodb-mongod-conf'])
+                        host.close()
+                        logging.info('Collecting info about shard member {}'.format(shard_member['name'].split(':')[0]))
+
+        snapshot_list = list()
+        if topology['cluster_type'] == 'replSet':
+            for rs_member in topology['members']:
+                if rs_member['stateStr'] == 'PRIMARY' or rs_member['stateStr'] == 'SECONDARY':
+                    per_server_cg = dict()
+                    per_server_cg['volume'] = list()
+                    per_server_cg['snapname'] = self.backup['backup-name']
+                    per_server_cg['snap-type'] = 'cgsnap'
+                    per_server_cg['cg-timeout'] = 'relaxed'
+                    per_server_cg['member_name'] = rs_member['name'].split(':')[0]
+                    for volume in rs_member['storage_info']['volume_topology']:
+                        per_server_cg['volume'].append(volume['volume'])
+                        per_server_cg['svm-name'] = volume['svm-name']
+
+                    snapshot_list.append(per_server_cg)
+
+        elif topology['cluster_type'] == 'sharded':
+            for cs_member in topology['config_servers']:
+                if cs_member['stateStr'] == 'PRIMARY' or cs_member['stateStr'] == 'SECONDARY':
+                    per_server_cg = dict()
+                    per_server_cg['volume'] = list()
+                    per_server_cg['snapname'] = self.backup['backup-name']
+                    per_server_cg['snap-type'] = 'cgsnap'
+                    per_server_cg['cg-timeout'] = 'relaxed'
+                    per_server_cg['member_name'] = cs_member['name'].split(':')[0]
+                    for volume in cs_member['storage_info']['volume_topology']:
+                        per_server_cg['volume'].append(volume['volume'])
+                        per_server_cg['svm-name'] = volume['svm-name']
+
+                    snapshot_list.append(per_server_cg)
 
             for shard_replset in topology['shards']:
                 for shard_member in shard_replset['shard_members']:
-                    if shard_member['stateStr'] == 'PRIMARY':
-                        primaries_list.append(shard_member['name'][:shard_member['name'].find(':')])
-                        logging.info(shard_member['name'][:shard_member['name'].find(':')] + ' server is the current '
-                                      + shard_replset['shard_name'] + ' primary member')
-                    elif shard_member['stateStr'] == 'SECONDARY':
-                        secondaries_list.append(shard_member['name'][:shard_member['name'].find(':')])
+                    if shard_member['stateStr'] == 'PRIMARY' or shard_member['stateStr'] == 'SECONDARY':
+                        per_server_cg = dict()
+                        per_server_cg['volume'] = list()
+                        per_server_cg['snapname'] = self.backup['backup-name']
+                        per_server_cg['snap-type'] = 'cgsnap'
+                        per_server_cg['cg-timeout'] = 'relaxed'
+                        per_server_cg['member_name'] = shard_member['name'].split(':')[0]
+                        for volume in shard_member['storage_info']['volume_topology']:
+                            per_server_cg['volume'].append(volume['volume'])
+                            per_server_cg['svm-name'] = volume['svm-name']
 
-        data_members = list()
-        for sec in secondaries_list:
-            data_members.append(sec)
-
-        for pri in primaries_list:
-            data_members.append(pri)
-
-        # -- Working with primaries_list to get the volumes used by each primary -- #
-        svm_n_vols_layout = list()
-
-        # --- Creating an array to store host_conn objects
-        ssh2host = list()
-        for host in data_members:
-            ssh2host.append(HostConn(ipaddr=host, username=self.backup['username']))
-
-        for host in ssh2host:
-            svm_n_vols_layout.append(host.get_storage_layout(cluster_info['mongodb-mongod-conf']))
-            host.close()
-
-        # -- Creating snapshots objects list
-        snapshot_list = list()
-        cluster_sessions_list = list()
-        for svm_n_vols in svm_n_vols_layout:
-            per_server_cg = dict()
-            per_server_cg['volume'] = list()
-            for volume in svm_n_vols['volume_topology']:
-                per_server_cg['volume'].append(volume['volume'])
-                per_server_cg['svm-name'] = volume['svm-name'].strip()
-
-            per_server_cg['snapname'] = self.backup['backup-name']
-            per_server_cg['snap-type'] = 'cgsnap'
-            per_server_cg['cg-timeout'] = 'relaxed'
-            per_server_cg['primary_name'] = svm_n_vols['hostname_ip']
-
-            snapshot_list.append(per_server_cg)
+                        snapshot_list.append(per_server_cg)
 
         # -- If sharded cluster, stopping the balancer before taking any snapshot
         if topology['cluster_type'] == 'sharded':
             mdbcluster.stop_balancer()
 
-        # -- Creating CG snapshots per Primary
+        # -- Creating CG snapshots
         # -- -- Connecting to kairos_repo to get the storage credentials
         kdb_netapp = kdb_session['ntapsystems']
 
-        # -- -- For each Primary identified by the time of the backup, connects to its storage and shoot a snapshot
-        for server in snapshot_list:
-            svm_info = kdb_netapp.find_one({'svm-name': server['svm-name']})
+        for cgsnapshot in snapshot_list:
+            svm_info = kdb_netapp.find_one({'svm-name': cgsnapshot['svm-name']})
             cs_svm = ClusterSession(svm_info['netapp-ip'], svm_info['username'], svm_info['password'], svm_info['svm-name'])
-            cgsnap = Snapshot(server)
+            cgsnap = Snapshot(cgsnapshot)
             result = cgsnap.cgcreate(cs_svm)
             if result[0] == 'passed':
-                logging.info(server['primary_name'] + ' snapshot has been successfully taken.')
+                logging.info('CG Snapshot of member {} has been successfully taken.'.format(cgsnapshot['member_name']))
             else:
                 #TODO: Rollback backup operation by deleting other volumes snapshots
-                logging.error(server['primary_name'] + ' snapshot has failed.')
+                logging.error('CG Snapshot of member {} has failed.'.format(cgsnapshot['member_name']))
                 logging.error(result[1])
                 if topology['cluster_type'] == 'sharded':
                     mdbcluster.start_balancer()
@@ -230,8 +230,8 @@ class SubCmdBackup:
         bkp_metadata['cluster_name'] = self.backup['cluster-name']
         bkp_metadata['created_at'] = datetime.now()
         bkp_metadata['mongo_topology'] = topology
-        bkp_metadata['svms_n_vols'] = svm_n_vols_layout
         bkp_metadata['retention'] = self._calc_retention(self.backup['retention'], bkp_metadata['created_at'])
+
         kdb_backups = kdb_session['backups']
         kdb_backups.insert_one(bkp_metadata)
 
@@ -244,13 +244,35 @@ class SubCmdBackup:
             exit(1)
 
         delete_list = dict()
-        for svm_n_vol in bkp2delete['svms_n_vols']:
-            for vol in svm_n_vol['volume_topology']:
-                if vol['svm-name'] not in delete_list.keys():
-                    delete_list[vol['svm-name']] = list()
-                    delete_list[vol['svm-name']].append(vol['volume'])
-                else:
-                    delete_list[vol['svm-name']].append(vol['volume'])
+        if bkp2delete['mongo_topology']['cluster_type'] == 'replSet':
+            for rs_member in bkp2delete['mongo_topology']['members']:
+                if rs_member['stateStr'] == 'PRIMARY' or rs_member['stateStr'] == 'SECONDARY':
+                    for vol in rs_member['storage_info']['volume_topology']:
+                        if vol['svm-name'] not in delete_list.keys():
+                            delete_list[vol['svm-name']] = list()
+                            delete_list[vol['svm-name']].append(vol['volume'])
+                        else:
+                            delete_list[vol['svm-name']].append(vol['volume'])
+
+        elif bkp2delete['mongo_topology']['cluster_type'] == 'sharded':
+            for cs_member in bkp2delete['mongo_topology']['config_servers']:
+                if cs_member['stateStr'] == 'PRIMARY' or cs_member['stateStr'] == 'SECONDARY':
+                    for vol in cs_member['storage_info']['volume_topology']:
+                        if vol['svm-name'] not in delete_list.keys():
+                            delete_list[vol['svm-name']] = list()
+                            delete_list[vol['svm-name']].append(vol['volume'])
+                        else:
+                            delete_list[vol['svm-name']].append(vol['volume'])
+
+            for shard_replset in bkp2delete['mongo_topology']['shards']:
+                for shard_member in shard_replset['shard_members']:
+                    if shard_member['stateStr'] == 'PRIMARY' or shard_member['stateStr'] == 'SECONDARY':
+                        for vol in shard_member['storage_info']['volume_topology']:
+                            if vol['svm-name'] not in delete_list.keys():
+                                delete_list[vol['svm-name']] = list()
+                                delete_list[vol['svm-name']].append(vol['volume'])
+                            else:
+                                delete_list[vol['svm-name']].append(vol['volume'])
 
         # -- Checking if the snapshot is ready to be deleted across all volumes
         kdb_netapp = kdb_session['ntapsystems']
@@ -336,8 +358,310 @@ class SubCmdBackup:
             return created_at + timedelta(weeks=int(value))
 
 class SubCmdRecovery:
-    def __init__(self):
-        pass
+    def __init__(self, rst_spec=None):
+        self.backup_name = rst_spec['backup-name']
+        self.cluster_name = rst_spec['cluster-name']
+        self.username = rst_spec['username']
 
+    def restore(self, kdb_session):
+        kdb_backup = kdb_session['backups']
+        bkp2restore = kdb_backup.find_one({'backup_name': self.backup_name, 'cluster_name': self.cluster_name})
 
+        if bkp2restore is None:
+            logging.error('Backup {} could not be found for cluster {}.'.format(self.backup_name, self.cluster_name))
+            exit(1)
 
+        # -- Preparation phase for ReplicaSet Cluster
+        if bkp2restore['mongo_topology']['cluster_type'] == 'replSet':
+            for rs_member in bkp2restore['mongo_topology']['members']:
+                host = HostConn(ipaddr=rs_member['name'].split(':')[0], username=self.username)
+                # -- Stopping mongod
+                stop_mongo = host.stop_service('mongod')
+                if stop_mongo[1] != 0:
+                    logging.error('Cannot stop MongoDB on host {}.'.format(rs_member['name'].split(':')[0]))
+                    exit(1)
+                else:
+                    logging.info('MongoDB has been stopped on host {}.'.format(rs_member['name'].split(':')[0]))
+
+                # -- For every data bearing node: umount, vgchange and multipath stop
+                if rs_member['stateStr'] == 'PRIMARY' or rs_member['stateStr'] == 'SECONDARY':
+                    umount_fs = host.umount_fs(fs_mountpoint=rs_member['storage_info']['mountpoint'])
+                    if umount_fs[1] != 0:
+                        logging.error('Cannot unmount MongoDB file system {}.'.format(rs_member['storage_info']['mountpoint']))
+                        exit(1)
+                    else:
+                        logging.info('MongoDB file system {} has been successfully unmounted.'.format(rs_member['storage_info']['mountpoint']))
+
+                    vgchange = host.disable_vg(vg_name=rs_member['storage_info']['lvm_vgname'])
+                    if vgchange[1] != 0:
+                        logging.error('Cannot deactive volume group {}.'.format(rs_member['storage_info']['lvm_vgname']))
+                        exit(1)
+                    else:
+                        logging.info('MongoDB volume group {} has been successfully disabled.'.format(rs_member['storage_info']['lvm_vgname']))
+
+                    multipath = host.stop_service('multipathd')
+                    if multipath[1] != 0:
+                       logging.error('Cannot stop multipathd on host {}.'.format(rs_member['name'].split(':')[0]))
+                       exit(1)
+                    else:
+                        logging.info('Multipathd has been successfully stopped on host {}.'.format(rs_member['name'].split(':')[0]))
+
+        # -- Preparation phase for Sharded Clusters
+        if bkp2restore['mongo_topology']['cluster_type'] == 'sharded':
+            for cs_member in bkp2restore['mongo_topology']['config_servers']:
+                host = HostConn(ipaddr=cs_member['name'].split(':')[0], username=self.username)
+                # -- Stopping mongod
+                stop_mongo = host.stop_service('mongod')
+                if stop_mongo[1] != 0:
+                    logging.error(
+                        'Cannot stop MongoDB on host {}.'.format(cs_member['name'].split(':')[0]))
+                    exit(1)
+                else:
+                    logging.info(
+                        'MongoDB has been stopped on host {}.'.format(cs_member['name'].split(':')[0]))
+
+                # -- For every data bearing node: umount, vgchange and multipath stop
+                if cs_member['stateStr'] == 'PRIMARY' or cs_member['stateStr'] == 'SECONDARY':
+                    umount_fs = host.umount_fs(fs_mountpoint=cs_member['storage_info']['mountpoint'])
+                    if umount_fs[1] != 0:
+                        logging.error('Cannot unmount MongoDB file system {}.'.format(
+                            cs_member['storage_info']['mountpoint']))
+                        exit(1)
+                    else:
+                        logging.info('MongoDB file system {} has been successfully unmounted.'.format(
+                            cs_member['storage_info']['mountpoint']))
+
+                    vgchange = host.disable_vg(vg_name=cs_member['storage_info']['lvm_vgname'])
+                    if vgchange[1] != 0:
+                        logging.error('Cannot deactive volume group {}.'.format(
+                            cs_member['storage_info']['lvm_vgname']))
+                        exit(1)
+                    else:
+                        logging.info('MongoDB volume group {} has been successfully disabled.'.format(
+                            cs_member['storage_info']['lvm_vgname']))
+
+                    multipath = host.stop_service('multipathd')
+                    if multipath[1] != 0:
+                        logging.error('Cannot stop multipathd on host {}.'.format(
+                            cs_member['name'].split(':')[0]))
+                        exit(1)
+                    else:
+                        logging.info('Multipathd has been successfully stopped on host {}.'.format(
+                            cs_member['name'].split(':')[0]))
+
+            for shard_replset in bkp2restore['mongo_topology']['shards']:
+                for shard_member in shard_replset['shard_members']:
+                    host = HostConn(ipaddr=shard_member['name'].split(':')[0], username=self.username)
+                    # -- Stopping mongod
+                    stop_mongo = host.stop_service('mongod')
+                    if stop_mongo[1] != 0:
+                        logging.error(
+                            'Cannot stop MongoDB on host {}.'.format(shard_member['name'].split(':')[0]))
+                        exit(1)
+                    else:
+                        logging.info(
+                            'MongoDB has been stopped on host {}.'.format(shard_member['name'].split(':')[0]))
+
+                    # -- For every data bearing node: umount, vgchange and multipath stop
+                    if shard_member['stateStr'] == 'PRIMARY' or shard_member['stateStr'] == 'SECONDARY':
+                        umount_fs = host.umount_fs(fs_mountpoint=shard_member['storage_info']['mountpoint'])
+                        if umount_fs[1] != 0:
+                            logging.error('Cannot unmount MongoDB file system {}.'.format(
+                                shard_member['storage_info']['mountpoint']))
+                            exit(1)
+                        else:
+                            logging.info('MongoDB file system {} has been successfully unmounted.'.format(
+                                shard_member['storage_info']['mountpoint']))
+
+                        vgchange = host.disable_vg(vg_name=shard_member['storage_info']['lvm_vgname'])
+                        if vgchange[1] != 0:
+                            logging.error('Cannot deactive volume group {}.'.format(
+                                shard_member['storage_info']['lvm_vgname']))
+                            exit(1)
+                        else:
+                            logging.info('MongoDB volume group {} has been successfully disabled.'.format(
+                                shard_member['storage_info']['lvm_vgname']))
+
+                        multipath = host.stop_service('multipathd')
+                        if multipath[1] != 0:
+                            logging.error('Cannot stop multipathd on host {}.'.format(
+                                shard_member['name'].split(':')[0]))
+                            exit(1)
+                        else:
+                            logging.info('Multipathd has been successfully stopped on host {}.'.format(
+                                shard_member['name'].split(':')[0]))
+
+        # -- Restore phase
+        snaprestore_list = dict()
+        if bkp2restore['mongo_topology']['cluster_type'] == 'replSet':
+            for rs_member in bkp2restore['mongo_topology']['members']:
+                if rs_member['stateStr'] == 'PRIMARY' or rs_member['stateStr'] == 'SECONDARY':
+                    for vol in rs_member['storage_info']['volume_topology']:
+                        if vol['svm-name'] not in snaprestore_list.keys():
+                            snaprestore_list[vol['svm-name']] = list()
+                            snaprestore_list[vol['svm-name']].append(vol['volume'])
+                        else:
+                            snaprestore_list[vol['svm-name']].append(vol['volume'])
+
+        elif bkp2restore['mongo_topology']['cluster_type'] == 'sharded':
+            for cs_member in bkp2restore['mongo_topology']['config_servers']:
+                if cs_member['stateStr'] == 'PRIMARY' or cs_member['stateStr'] == 'SECONDARY':
+                    for vol in cs_member['storage_info']['volume_topology']:
+                        if vol['svm-name'] not in snaprestore_list.keys():
+                            snaprestore_list[vol['svm-name']] = list()
+                            snaprestore_list[vol['svm-name']].append(vol['volume'])
+                        else:
+                            snaprestore_list[vol['svm-name']].append(vol['volume'])
+
+            for shard_replset in bkp2restore['mongo_topology']['shards']:
+                for shard_member in shard_replset['shard_members']:
+                    if shard_member['stateStr'] == 'PRIMARY' or shard_member[
+                        'stateStr'] == 'SECONDARY':
+                        for vol in shard_member['storage_info']['volume_topology']:
+                            if vol['svm-name'] not in snaprestore_list.keys():
+                                snaprestore_list[vol['svm-name']] = list()
+                                snaprestore_list[vol['svm-name']].append(vol['volume'])
+                            else:
+                                snaprestore_list[vol['svm-name']].append(vol['volume'])
+        
+        kdb_netapp = kdb_session['ntapsystems']
+        for svm in snaprestore_list.keys():
+            svm_info = kdb_netapp.find_one({'svm-name': svm})
+            cs_svm = ClusterSession(svm_info['netapp-ip'], svm_info['username'], svm_info['password'],
+                                    svm_info['svm-name'])
+            for volume in snaprestore_list[svm]:
+                snapspec = dict()
+                snapspec['volume'] = volume
+                snapspec['snapname'] = self.backup_name
+                snapshot = Snapshot(snapspec)
+                restore_result = snapshot.restore(cs_svm)
+                if restore_result[0] == 'passed':
+                    logging.info('Snapshot ' + snapspec['snapname'] + ' has been restored on volume ' + snapspec['volume'])
+                else:
+                    logging.error('Failed to restore snapshot ' + snapspec['snapname'] + ' on volume ' + snapspec['volume'] + '.')
+                    logging.error(restore_result[1])
+
+        # -- Post restore phase for ReplicaSet Cluster
+        if bkp2restore['mongo_topology']['cluster_type'] == 'replSet':
+            for rs_member in bkp2restore['mongo_topology']['members']:
+                host = HostConn(ipaddr=rs_member['name'].split(':')[0], username=self.username)
+                # -- For every data bearing node: multipath start, vgchange, mount
+                if rs_member['stateStr'] == 'PRIMARY' or rs_member['stateStr'] == 'SECONDARY':
+                    multipath = host.start_service('multipathd')
+                    if multipath[1] != 0:
+                        logging.error('Cannot start multipathd on host {}.'.format(rs_member['name'].split(':')[0]))
+                        exit(1)
+                    else:
+                        logging.info(
+                            'Multipathd has been successfully started on host {}.'.format(rs_member['name'].split(':')[0]))
+
+                    vgchange = host.enable_vg(vg_name=rs_member['storage_info']['lvm_vgname'])
+                    if vgchange[1] != 0:
+                        logging.error('Cannot activate volume group {} on host {}.'.format(rs_member['storage_info']['lvm_vgname'], rs_member['name'].split(':')[0]))
+                        exit(1)
+                    else:
+                        logging.info('MongoDB volume group {} has been successfully activated.'.format(
+                            rs_member['storage_info']['lvm_vgname']))
+
+                    mount_fs = host.mount_fs(fs_mountpoint=rs_member['storage_info']['mountpoint'], fs_type=rs_member['storage_info']['fs_type'], device=rs_member['storage_info']['mdb_device'])
+                    if mount_fs[1] != 0:
+                        logging.error(
+                            'Cannot mount MongoDB file system {} on host {}.'.format(rs_member['storage_info']['mountpoint'], rs_member['name'].split(':')[0]))
+                        exit(1)
+                    else:
+                        logging.info('MongoDB file system {} has been successfully mounted on host {}.'.format(
+                            rs_member['storage_info']['mountpoint'], rs_member['name'].split(':')[0]))
+
+                # -- Starting mongod
+                start_mongo = host.start_service('mongod')
+                if start_mongo[1] != 0:
+                    logging.error('Cannot start MongoDB on host {}.'.format(rs_member['name'].split(':')[0]))
+                    exit(1)
+                else:
+                    logging.info('MongoDB has been started on host {}.'.format(rs_member['name'].split(':')[0]))
+
+        # -- Post restore phase for Sharded Clusters
+        if bkp2restore['mongo_topology']['cluster_type'] == 'sharded':
+            for cs_member in bkp2restore['mongo_topology']['config_servers']:
+                host = HostConn(ipaddr=cs_member['name'].split(':')[0], username=self.username)
+                # -- For every data bearing node: multipath start, vgchange, mount
+                if cs_member['stateStr'] == 'PRIMARY' or cs_member['stateStr'] == 'SECONDARY':
+                    multipath = host.start_service('multipathd')
+                    if multipath[1] != 0:
+                        logging.error('Cannot start multipathd on host {}.'.format(cs_member['name'].split(':')[0]))
+                        exit(1)
+                    else:
+                        logging.info(
+                            'Multipathd has been successfully started on host {}.'.format(cs_member['name'].split(':')[0]))
+
+                    vgchange = host.enable_vg(vg_name=cs_member['storage_info']['lvm_vgname'])
+                    if vgchange[1] != 0:
+                        logging.error('Cannot activate volume group {} on host {}.'.format(cs_member['storage_info']['lvm_vgname'], cs_member['name'].split(':')[0]))
+                        exit(1)
+                    else:
+                        logging.info('MongoDB volume group {} has been successfully activated.'.format(
+                            cs_member['storage_info']['lvm_vgname']))
+
+                    mount_fs = host.mount_fs(fs_mountpoint=cs_member['storage_info']['mountpoint'], fs_type=cs_member['storage_info']['fs_type'], device=cs_member['storage_info']['mdb_device'])
+                    if mount_fs[1] != 0:
+                        logging.error(
+                            'Cannot mount MongoDB file system {} on host {}.'.format(cs_member['storage_info']['mountpoint'], cs_member['name'].split(':')[0]))
+                        exit(1)
+                    else:
+                        logging.info('MongoDB file system {} has been successfully mounted on host {}.'.format(
+                            cs_member['storage_info']['mountpoint'], cs_member['name'].split(':')[0]))
+
+                # -- Starting mongod
+                start_mongo = host.start_service('mongod')
+                if start_mongo[1] != 0:
+                    logging.error('Cannot start MongoDB on host {}.'.format(cs_member['name'].split(':')[0]))
+                    exit(1)
+                else:
+                    logging.info('MongoDB has been started on host {}.'.format(cs_member['name'].split(':')[0]))
+
+            for shard_replset in bkp2restore['mongo_topology']['shards']:
+                for shard_member in shard_replset['shard_members']:
+                    host = HostConn(ipaddr=shard_member['name'].split(':')[0], username=self.username)
+                    # -- For every data bearing node: multipath start, vgchange, mount
+                    if shard_member['stateStr'] == 'PRIMARY' or shard_member['stateStr'] == 'SECONDARY':
+                        multipath = host.start_service('multipathd')
+                        if multipath[1] != 0:
+                            logging.error('Cannot start multipathd on host {}.'.format(shard_member['name'].split(':')[0]))
+                            exit(1)
+                        else:
+                            logging.info(
+                                'Multipathd has been successfully started on host {}.'.format(
+                                    shard_member['name'].split(':')[0]))
+
+                        vgchange = host.enable_vg(vg_name=shard_member['storage_info']['lvm_vgname'])
+                        if vgchange[1] != 0:
+                            logging.error('Cannot activate volume group {} on host {}.'.format(
+                                shard_member['storage_info']['lvm_vgname'], shard_member['name'].split(':')[0]))
+                            exit(1)
+                        else:
+                            logging.info('MongoDB volume group {} has been successfully activated.'.format(
+                                shard_member['storage_info']['lvm_vgname']))
+
+                        mount_fs = host.mount_fs(fs_mountpoint=shard_member['storage_info']['mountpoint'],
+                                                 fs_type=shard_member['storage_info']['fs_type'],
+                                                 device=shard_member['storage_info']['mdb_device'])
+                        if mount_fs[1] != 0:
+                            logging.error(
+                                'Cannot mount MongoDB file system {} on host {}.'.format(
+                                    shard_member['storage_info']['mountpoint'], shard_member['name'].split(':')[0]))
+                            exit(1)
+                        else:
+                            logging.info('MongoDB file system {} has been successfully mounted on host {}.'.format(
+                                shard_member['storage_info']['mountpoint'], shard_member['name'].split(':')[0]))
+
+                    # -- Starting mongod
+                    start_mongo = host.start_service('mongod')
+                    if start_mongo[1] != 0:
+                        logging.error('Cannot start MongoDB on host {}.'.format(shard_member['name'].split(':')[0]))
+                        exit(1)
+                    else:
+                        logging.info('MongoDB has been started on host {}.'.format(shard_member['name'].split(':')[0]))
+
+        # -- Housekeeping on backup's metadata
+        delete_newers = kdb_backup.delete_many({'created_at': { '$gt': bkp2restore['created_at']}})
+        logging.info('{} backups has been removed from the backup catalog.'.format(delete_newers.deleted_count))
