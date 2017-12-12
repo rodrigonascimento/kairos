@@ -6,7 +6,7 @@ from pymongo import MongoClient, errors
 from sys import exit
 from time import sleep, time
 from datetime import datetime, timedelta
-from ontap import ClusterSession, Snapshot
+from ontap import ClusterSession, Snapshot, FlexClone, InitiatorGroup, Lun
 from mongodbcluster import MongoDBCluster
 from host_conn import HostConn
 
@@ -363,7 +363,7 @@ class SubCmdRecovery:
         self.cluster_name = rst_spec['cluster-name']
         self.username = rst_spec['username']
 
-    def restore(self, kdb_session):
+    def restore(self, kdb_session=None):
         kdb_backup = kdb_session['backups']
         bkp2restore = kdb_backup.find_one({'backup_name': self.backup_name, 'cluster_name': self.cluster_name})
 
@@ -665,3 +665,361 @@ class SubCmdRecovery:
         # -- Housekeeping on backup's metadata
         delete_newers = kdb_backup.delete_many({'created_at': { '$gt': bkp2restore['created_at']}})
         logging.info('{} backups has been removed from the backup catalog.'.format(delete_newers.deleted_count))
+
+class SubCmdClone:
+    def __init__(self, clone_args=None):
+        self.backup_name = clone_args['backup-name']
+        self.clone_name = clone_args['clone-name']
+        self.clone_spec = clone_args['clone-spec']
+        self.cluster_name = clone_args['cluster-name']
+        self.username = clone_args['username']
+        self.clone_uid = time()
+
+    def create_storage_clone(self, kdb_session=None):
+        kdb_backup = kdb_session['backups']
+        bkp2clone = kdb_backup.find_one({'backup_name': self.backup_name, 'cluster_name': self.cluster_name})
+        if bkp2clone is None:
+            logging.error('Cannot find backup {} for cluster {}.'.format(self.backup_name, self.cluster_name))
+            exit(1)
+
+        # -- Preparation phase -- getting info to create igroups and flexclones
+        mongo_cluster = dict()
+        if self.clone_spec['cluster_type'] == 'sharded':
+            mongo_cluster['config_servers'] = list()
+            mongo_cluster['shards'] = list()
+
+            for cs in self.clone_spec['config_servers']:
+                config_server = dict()
+                config_server['svm-name'] = cs['svm-name']
+                config_server['hostname'] = cs['hostname']
+                config_server['mountpoint'] = cs['mountpoint']
+                config_server['iscsi_target'] = cs['iscsi_target']
+                config_server['port'] = cs['port']
+                config_server['setname'] = cs['setname']
+                config_server['dir_per_db'] = cs['dir_per_db']
+
+                host = HostConn(ipaddr=cs['hostname'], username=self.username)
+
+                igroup_spec = dict()
+                result_get_hostname = host.get_hostname()
+                if result_get_hostname[1] == 0:
+                    logging.info('Preparing initiator group for host {}.'.format(cs['hostname']))
+                    igroup_spec['igroup-name'] = 'ig_' + result_get_hostname[0].strip('\n') + '_' + self.clone_name
+                    igroup_spec['igroup-type'] = cs['protocol']
+                    igroup_spec['os-type'] = 'linux'
+                    if cs['protocol'] == 'iscsi':
+                        result_get_initiator = host.get_iscsi_iqn()
+                        if result_get_initiator[1] == 0:
+                            logging.info('Collecting initiator information on host {}.'.format(cs['hostname']))
+                            initiator = result_get_initiator[0].split('=')[1].strip()
+                            config_server['igroup'] = InitiatorGroup(igroup_spec)
+                            config_server['initiator'] = initiator
+                            host.close()
+                        else:
+                            logging.error('Could not get initiator from host {}.'.format(cs['hostname']))
+                            exit(1)
+                else:
+                    logging.error('Cannot get hostname from host {}.'.format(cs['hostname']))
+                    exit(1)
+
+                config_server['volclone_topology'] = list()
+                config_server['lun_mapping'] = list()
+                for bkp_cs in bkp2clone['mongo_topology']['config_servers']:
+                    if bkp_cs['stateStr'] == cs['clone_from'].upper():
+                        config_server['storage_info'] = dict()
+                        config_server['storage_info']['lvm_vgname'] = bkp_cs['storage_info']['lvm_vgname']
+                        config_server['storage_info']['fs_type'] = bkp_cs['storage_info']['fs_type']
+                        config_server['storage_info']['mdb_device'] = bkp_cs['storage_info']['mdb_device']
+                        for vol in bkp_cs['storage_info']['volume_topology']:
+                            clone_spec = dict()
+                            clone_spec['volume'] = self.clone_name + '_' + vol['volume'] + '_' + str(int(self.clone_uid))
+                            clone_spec['parent-volume'] = vol['volume']
+                            clone_spec['parent-snapshot'] = self.backup_name
+                            flexclone = FlexClone(clone_spec)
+                            config_server['volclone_topology'].append(flexclone)
+                            logging.info('Volume {} ready to be cloned as {} on host {}'.format(vol['volume'],
+                                                                                                clone_spec['volume'],
+                                                                                                cs['hostname']
+                                                                                                ))
+                            lun_spec = dict()
+                            lun_spec['path'] = '/vol/' + clone_spec['volume'] + '/' + vol['lun-name']
+                            lun_spec['igroup-name'] = igroup_spec['igroup-name']
+                            lun_map = Lun(lun_spec)
+                            config_server['lun_mapping'].append(lun_map)
+                            logging.info('Preparing LUN {} to be mapped to igroup {}.'.format(lun_spec['path'],
+                                                                                              lun_spec['igroup-name']
+                                                                                              ))
+                        break
+
+                mongo_cluster['config_servers'].append(config_server)
+
+            for shard in self.clone_spec['shards']:
+                shard_replset = dict()
+                shard_replset['name'] = shard['shard_name']
+                shard_replset['members'] = list()
+
+                for shard_member in shard['shard_members']:
+                    member = dict()
+                    member['svm-name'] = shard_member['svm-name']
+                    member['hostname'] = shard_member['hostname']
+                    member['mountpoint'] = shard_member['mountpoint']
+                    member['iscsi_target'] = shard_member['iscsi_target']
+                    member['port'] = shard_member['port']
+                    member['dir_per_db'] = shard_member['dir_per_db']
+
+                    host = HostConn(ipaddr=member['hostname'], username=self.username)
+
+                    igroup_spec = dict()
+                    result_get_hostname = host.get_hostname()
+                    if result_get_hostname[1] == 0:
+                        logging.info('Preparing initiator group for host {}.'.format(shard_member['hostname']))
+                        igroup_spec['igroup-name'] = 'ig_' + result_get_hostname[0].strip('\n') + '_' + self.clone_name
+                        igroup_spec['igroup-type'] = shard_member['protocol']
+                        igroup_spec['os-type'] = 'linux'
+                        if shard_member['protocol'] == 'iscsi':
+                            result_get_initiator = host.get_iscsi_iqn()
+                            if result_get_initiator[1] == 0:
+                                logging.info('Collecting initiator information on host {}.'.format(shard_member['hostname']))
+                                initiator = result_get_initiator[0].split('=')[1].strip()
+                                member['igroup'] = InitiatorGroup(igroup_spec)
+                                member['initiator'] = initiator
+                                host.close()
+                            else:
+                                logging.error('Could not get initiator from host {}.'.format(member['hostname']))
+                                exit(1)
+                    else:
+                        logging.error('Cannot get hostname from host {}.'.format(member['hostname']))
+                        exit(1)
+
+                    member['volclone_topology'] = list()
+                    member['lun_mapping'] = list()
+                    for bkp_shard in bkp2clone['mongo_topology']['shards']:
+                        for bkp_shard_member in bkp_shard['shard_members']:
+                            if bkp_shard_member['stateStr'] == shard_member['clone_from'].upper() and bkp_shard['shard_name'] == shard['shard_name']:
+                                member['storage_info'] = dict()
+                                member['storage_info']['lvm_vgname'] = bkp_shard_member['storage_info']['lvm_vgname']
+                                member['storage_info']['fs_type'] = bkp_shard_member['storage_info']['fs_type']
+                                member['storage_info']['mdb_device'] = bkp_shard_member['storage_info']['mdb_device']
+
+                                for vol in bkp_shard_member['storage_info']['volume_topology']:
+                                    if vol['svm-name'] != shard_member['svm-name']:
+                                        logging.error('You are asking a clone from a {} member on svm {}, but there is no {} on svm {} for shard {} on backup {}'.format(
+                                                     shard_member['clone_from'], shard_member['svm-name'], shard_member['clone_from'],
+                                                     shard_member['svm-name'], shard['shard_name'], self.backup_name
+                                                     ))
+                                        exit(1)
+
+                                    clone_spec = dict()
+                                    clone_spec['volume'] = self.clone_name + '_' + vol['volume'] + '_' + str(
+                                        int(self.clone_uid))
+                                    clone_spec['parent-volume'] = vol['volume']
+                                    clone_spec['parent-snapshot'] = self.backup_name
+                                    flexclone = FlexClone(clone_spec)
+                                    member['volclone_topology'].append(flexclone)
+                                    logging.info('Volume {} ready to be cloned as {} on host {}'.format(vol['volume'],
+                                                                                                        clone_spec['volume'],
+                                                                                                        cs['hostname']
+                                                                                                        ))
+                                    lun_spec = dict()
+                                    lun_spec['path'] = '/vol/' + clone_spec['volume'] + '/' + vol['lun-name']
+                                    lun_spec['igroup-name'] = igroup_spec['igroup-name']
+                                    lun_map = Lun(lun_spec)
+                                    member['lun_mapping'].append(lun_map)
+                                    logging.info('Preparing LUN {} to be mapped to igroup {}.'.format(lun_spec['path'],
+                                                                                                      lun_spec['igroup-name']
+                                                                                                      ))
+                                shard_replset['members'].append(member)
+                                break
+
+                mongo_cluster['shards'].append(shard_replset)
+
+            # -- Execution phase
+            for cs in mongo_cluster['config_servers']:
+                kdb_ntapsys = kdb_session['ntapsystems']
+                ntapsys = kdb_ntapsys.find_one({'svm-name': cs['svm-name']})
+                if ntapsys is None:
+                    logging.error('Cannot find SVM {} in the netapp repository collection.'.format(cs['svm-name']))
+                    exit(1)
+
+                svm_session = ClusterSession(cluster_ip=ntapsys['netapp-ip'], user=ntapsys['username'],
+                                             password=ntapsys['password'], vserver=ntapsys['svm-name'])
+
+                result = cs['igroup'].create(svm=svm_session)
+                if result[0] == 'passed':
+                    logging.info('Initiator group {} has been created.'.format(cs['igroup'].initiator_group_name))
+                    result = cs['igroup'].add_initiators(svm=svm_session, initiator_list=cs['initiator'])
+                    if result[0] == 'passed':
+                        logging.info('Initiator {} has been added to {}.'.format(cs['initiator'], cs['igroup'].initiator_group_name))
+                    else:
+                        logging.error('Failed to add initiator {} to igroup {}.'.format(cs['igroup'].initiator_group_name, cs['initiator']))
+                        exit(1)
+                else:
+                    logging.error('Failed to create initiator group {}.'.format(cs['igroup'].initiator_group_name))
+                    exit(1)
+
+                for volclone in cs['volclone_topology']:
+                    result = volclone.create(svm=svm_session)
+                    if result[0] == 'passed':
+                        logging.info('FlexClone {} has been created.'.format(volclone.volume))
+                    else:
+                        logging.error('Failed to create flexclone {}.'.format(volclone.volume))
+                        exit(1)
+
+                for lun in cs['lun_mapping']:
+                    result = lun.mapping(svm=svm_session)
+                    if result[0] == 'passed':
+                        logging.info('LUN {} has been mapped to igroup {}.'.format(lun.path, lun.igroup_name))
+                    else:
+                        logging.error('Failed to map LUN {} to igroup {}.'.format(lun.path, lun.igroup_name))
+                        exit(1)
+
+                # -- openning ssh connection to execute host side commands
+                host = HostConn(ipaddr=cs['hostname'], username=self.username)
+
+                result = host.iscsi_send_targets(iscsi_target=cs['iscsi_target'])
+                if result[1] != 0:
+                    logging.error('{} on host {}.'.format(result[0], cs['hostname']))
+                    exit(1)
+                else:
+                    logging.info('Discovering targets for {} on host {}.'.format(cs['iscsi_target'],
+                                                                                 cs['hostname']))
+
+                result = host.iscsi_node_login()
+                if result[1] != 0:
+                    logging.error('{} on host {}.'.format(result[0], cs['hostname']))
+                    exit(1)
+                else:
+                    logging.info('Logged in to ISCSI targets and ready to rescan devices on host {}.'.format(cs['hostname']))
+
+                # -- rescanning disk devices
+                result = host.iscsi_rescan()
+                if result[1] != 0:
+                    logging.error('Could not rescan {} devices on host {}.'.format(cs['igroup'].initiator_group_type,
+                                                                                   cs['hostname']))
+                    exit(1)
+                else:
+                    logging.info('{} devices have been scanned on host {}.'.format(cs['igroup'].initiator_group_type,
+                                                                                   cs['hostname']))
+                # -- Activating volume group
+                result = host.enable_vg(vg_name=cs['storage_info']['lvm_vgname'])
+                if result[1] != 0:
+                    logging.error('Could not enable volume group {} on host {}'.format(cs['storage_info']['lvm_vgname'],
+                                                                                       cs['hostname']))
+                    exit(1)
+                else:
+                    logging.info('Volume Group {} has been activated on host {}.'.format(cs['storage_info']['lvm_vgname'],
+                                                                                         cs['hostname']))
+
+                # -- Mounting file system
+                result = host.mount_fs(fs_mountpoint=cs['mountpoint'], fs_type=cs['storage_info']['fs_type'],
+                                       device=cs['storage_info']['mdb_device'])
+                if result[1] != 0:
+                    logging.error('Could not mount device {} on host {}.'.format(cs['storage_info']['mdb_device'],
+                                                                                 cs['hostname']))
+                    exit(1)
+                else:
+                    logging.info('Device {} has been mounted to {} on host {}.'.format(cs['storage_info']['mdb_device'],
+                                                                                       cs['mountpoint'],
+                                                                                       cs['hostname']))
+                # -- Start MongoDB on standalone mode
+                if cs['dir_per_db']:
+                    recover_mode = '/usr/bin/mongod --logpath /var/log/mongodb/mongod_recover.log --dbpath ' + cs[
+                        'mountpoint'] + ' --port ' + cs['port'] + ' --directoryperdb --fork'
+                else:
+                    recover_mode = '/usr/bin/mongod --logpath /var/log/mongodb/mongod_recover.log --dbpath ' + cs[
+                        'mountpoint'] + ' --port ' + cs['port'] + ' --fork'
+
+                result = host.run_command('/sbin/runuser -l mongod -g mongod -c "' + recover_mode + '"')
+
+                host.close()
+
+            for shard in mongo_cluster['shards']:
+                for shard_member in shard['members']:
+                    kdb_ntapsys = kdb_session['ntapsystems']
+                    ntapsys = kdb_ntapsys.find_one({'svm-name': shard_member['svm-name']})
+                    if ntapsys is None:
+                        logging.error('Cannot find SVM {} in the netapp repository collection.'.format(shard_member['svm-name']))
+                        exit(1)
+    
+                    svm_session = ClusterSession(cluster_ip=ntapsys['netapp-ip'], user=ntapsys['username'],
+                                                 password=ntapsys['password'], vserver=ntapsys['svm-name'])
+    
+                    result = shard_member['igroup'].create(svm=svm_session)
+                    if result[0] == 'passed':
+                        logging.info('Initiator group {} has been created.'.format(shard_member['igroup'].initiator_group_name))
+                        result = shard_member['igroup'].add_initiators(svm=svm_session, initiator_list=shard_member['initiator'])
+                        if result[0] == 'passed':
+                            logging.info('Initiator {} has been added to {}.'.format(shard_member['initiator'], shard_member['igroup'].initiator_group_name))
+                        else:
+                            logging.error('Failed to add initiator {} to igroup {}.'.format(shard_member['igroup'].initiator_group_name, shard_member['initiator']))
+                            exit(1)
+                    else:
+                        logging.error('Failed to create initiator group {}.'.format(shard_member['igroup'].initiator_group_name))
+                        exit(1)
+
+                    for volclone in shard_member['volclone_topology']:
+                        result = volclone.create(svm=svm_session)
+                        if result[0] == 'passed':
+                            logging.info('FlexClone {} has been created.'.format(volclone.volume))
+                        else:
+                            logging.error('Failed to create flexclone {}.'.format(volclone.volume))
+                            exit(1)
+
+                    for lun in shard_member['lun_mapping']:
+                        result = lun.mapping(svm=svm_session)
+                        if result[0] == 'passed':
+                            logging.info('LUN {} has been mapped to igroup {}.'.format(lun.path, lun.igroup_name))
+                        else:
+                            logging.error('Failed to map LUN {} to igroup {}.'.format(lun.path, lun.igroup_name))
+                            exit(1)
+                            
+                    # -- openning ssh connection to execute host side commands
+                    host = HostConn(ipaddr=shard_member['hostname'], username=self.username)
+    
+                    result = host.iscsi_send_targets(iscsi_target=shard_member['iscsi_target'])
+                    if result[1] != 0:
+                        logging.error('{} on host {}.'.format(result[0], shard_member['hostname']))
+                        exit(1)
+                    else:
+                        logging.info('Discovering targets for {} on host {}.'.format(shard_member['iscsi_target'],
+                                                                                     shard_member['hostname']))
+    
+                    result = host.iscsi_node_login()
+                    if result[1] != 0:
+                        logging.error('{} on host {}.'.format(result[0], shard_member['hostname']))
+                        exit(1)
+                    else:
+                        logging.info('Logged in to ISCSI targets and ready to rescan devices on host {}.'.format(shard_member['hostname']))
+    
+                    # -- rescanning disk devices
+                    result = host.iscsi_rescan()
+                    if result[1] != 0:
+                        logging.error('Could not rescan {} devices on host {}.'.format(shard_member['igroup'].initiator_group_type,
+                                                                                       shard_member['hostname']))
+                        exit(1)
+                    else:
+                        logging.info('{} devices have been scanned on host {}.'.format(shard_member['igroup'].initiator_group_type,
+                                                                                       shard_member['hostname']))
+                    # -- Activating volume group
+                    result = host.enable_vg(vg_name=shard_member['storage_info']['lvm_vgname'])
+                    if result[1] != 0:
+                        logging.error('Could not enable volume group {} on host {}'.format(shard_member['storage_info']['lvm_vgname'],
+                                                                                           shard_member['hostname']))
+                        exit(1)
+                    else:
+                        logging.info('Volume Group {} has been activated on host {}.'.format(shard_member['storage_info']['lvm_vgname'],
+                                                                                             shard_member['hostname']))
+    
+                    # -- Mounting file system
+                    result = host.mount_fs(fs_mountpoint=shard_member['mountpoint'], fs_type=shard_member['storage_info']['fs_type'],
+                                           device=shard_member['storage_info']['mdb_device'])
+                    if result[1] != 0:
+                        logging.error('Could not mount device {} on host {}.'.format(shard_member['storage_info']['mdb_device'],
+                                                                                     shard_member['hostname']))
+                        exit(1)
+                    else:
+                        logging.info('Device {} has been mounted to {} on host {}.'.format(shard_member['storage_info']['mdb_device'],
+                                                                                           shard_member['mountpoint'],
+                                                                                           shard_member['hostname']))
+                    host.close()
+

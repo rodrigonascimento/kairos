@@ -155,13 +155,12 @@ class LogicalInterface:
 
 
 class InitiatorGroup:
-    def __init__(self, ig_spec):
+    def __init__(self, ig_spec=None):
         self.initiator_group_name = ig_spec['igroup-name']
         self.initiator_group_type = ig_spec['igroup-type']
         self.os_type = ig_spec['os-type']
-        self.initiator_list = ig_spec['initiator-list']
 
-    def create(self, svm):
+    def create(self, svm=None):
         api_call = NaElement('igroup-create')
         api_call.child_add_string('initiator-group-name', self.initiator_group_name)
         api_call.child_add_string('initiator-group-type', self.initiator_group_type)
@@ -170,17 +169,25 @@ class InitiatorGroup:
         output = svm.run_command(api_call)
         return output.results_status(), output.sprintf()
 
-    def add_initiators(self, svm):
-        results = []
-        for wwpn in self.initiator_list:
+    def add_initiators(self, svm=None, initiator_list=None):
+        if initiator_list is list():
+            results = []
+            for initiator in initiator_list:
+                api_call = NaElement('igroup-add')
+                api_call.child_add_string('initiator-group-name', self.initiator_group_name)
+                api_call.child_add_string('initiator', initiator)
+
+                output = svm.run_command(api_call)
+                results.append((output.results_status(), output.sprintf(), self.initiator_group_name, initiator))
+
+            return results
+        elif initiator_list is not list():
             api_call = NaElement('igroup-add')
             api_call.child_add_string('initiator-group-name', self.initiator_group_name)
-            api_call.child_add_string('initiator', wwpn)
+            api_call.child_add_string('initiator', initiator_list)
 
             output = svm.run_command(api_call)
-            results.append((output.results_status(), output.sprintf(), self.initiator_group_name, wwpn))
-
-        return results
+            return output.results_status(), output.sprintf()
 
     def destroy(self, cluster):
         pass
@@ -247,9 +254,9 @@ class Lun:
             self.space_allocation_enabled = lun_spec['space-allocation-enabled']
         if 'igroup-name' in lun_spec:
             self.igroup_name = lun_spec['igroup-name']
-        if 'vserver' in lun_spec['svm-name']:
+        if 'vserver' in lun_spec:
             self.svm_name = lun_spec['svm-name']
-        if 'lun-id' in lun_spec['lun-id']:
+        if 'lun-id' in lun_spec:
             self.lun_id = lun_spec['lun-id']
 
     def create(self, svm):
@@ -264,16 +271,24 @@ class Lun:
         return output.results_status(), output.sprintf()
 
     def mapping(self, svm):
-        results = []
-        for igroup in self.igroup_name:
+        if self.igroup_name is list():
+            results = []
+            for igroup in self.igroup_name:
+                api_call = NaElement('lun-map')
+                api_call.child_add_string('path', self.path)
+                api_call.child_add_string('initiator-group', igroup)
+
+                output = svm.run_command(api_call)
+                results.append((output.results_status(), output.sprintf(), self.path, igroup))
+
+            return results
+        else:
             api_call = NaElement('lun-map')
             api_call.child_add_string('path', self.path)
-            api_call.child_add_string('initiator-group', igroup)
+            api_call.child_add_string('initiator-group', self.igroup_name)
 
             output = svm.run_command(api_call)
-            results.append((output.results_status(), output.sprintf(), self.path, igroup))
-
-        return results
+            return output.results_status(), output.sprintf()
 
     def unmapping(self, svm):
         results = []
@@ -369,7 +384,7 @@ class Snapshot:
         output = svm.run_command(api_call)
         return output.results_status(), output.sprintf()
 
-class Clone:
+class FlexClone:
     def __init__(self, clone_spec):
         self.volume = clone_spec['volume']
         self.parent_volume = clone_spec['parent-volume']

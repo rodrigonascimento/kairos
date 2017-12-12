@@ -4,10 +4,10 @@
 #
 #  Author  : logwriter (Rodrigo Nascimento)
 #  Version : 0.1
-#  Date    : October, 2017
+#  Date    : December, 2017
 #
 # -- Why Kairos? ----------------------------------------------------------------------------------------------------
-#  In the New Testament, "Kairos" refers to an opportune time, a ~moment~ or a ~season~ such as ~harvest time~
+#  In the New Testament, "Kairos" refers to the right time for an action.
 #  An orchastrated backup operation for a MongoDB database using snapshots has to happen in the right moment, it has
 #  to be quick and crash consistent without interfering with database operations.
 # -------------------------------------------------------------------------------------------------------------------
@@ -21,7 +21,7 @@ import logging
 from time import time, sleep, strftime
 
 sys.path.append(os.path.join(os.path.dirname(__file__)) + '/lib')
-from subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup, SubCmdRecovery
+from subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup, SubCmdRecovery, SubCmdClone
 
 def cmdargs():
     cmdopts = argparse.ArgumentParser(description='NetApp Data Protection for MongoDB')
@@ -75,10 +75,10 @@ def cmdargs():
     clone.add_argument('--create', action='store_true', help='Create a clone')
     clone.add_argument('--delete', action='store_true', help='Delete a clone')
     clone.add_argument('--list', action='store_true', help='List clones')
+    clone.add_argument('--cluster-name', type=str, help='MongoDB Cluster name to be cloned')
     clone.add_argument('--clone-name', type=str, help='Clone name')
     clone.add_argument('--backup-name', type=str, help='Backup name to be used as the baseline for your clone')
-    clone.add_argument('--date-time', type=str, help='Date & Time for point in time recovery')
-    clone.add_argument('--hosts-cfg', type=str, help='Config file about hosts where your clone will be mounted')
+    clone.add_argument('--clone-spec', type=str, help='Clone specification file')
     clone.set_defaults(which='clone')
 
     oplogtailer = subcmd.add_parser('oplogtailer')
@@ -287,7 +287,23 @@ def main():
 
     # -- If subcommand is clone
     if cliargs['which'] == 'clone':
-        pass
+        clone_args = dict()
+        clone_args['backup-name'] = cliargs['backup_name']
+        clone_args['clone-name'] = cliargs['clone_name']
+        clone_args['cluster-name'] = cliargs['cluster_name']
+        clone_args['username'] = kcfg['kairos']['username']
+        with open(cliargs['clone_spec'], 'r') as cs:
+            clone_args['clone-spec'] = json.load(cs)
+
+        clone = SubCmdClone(clone_args)
+
+        if cliargs['create']:
+            if (cliargs['cluster_name'] is None) or (cliargs['backup_name'] is None) or (cliargs['clone_name'] is None):
+                logging.error('You must enter a cluster-name, a backup-name, and a clone-name to create a clone')
+                sys.exit(1)
+            else:
+                clone.create_storage_clone(kairos_repo)
+                sys.exit(0)
 
     # -- If subcommand is oplogtailer
     if cliargs['which'] == 'oplogtailer':

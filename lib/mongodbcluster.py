@@ -27,7 +27,7 @@ class MongoDBCluster:
         mongos = MongoDBCluster(mongos_uri)
 
         while True:
-            status = mongos._run_command("balancerStatus")
+            status = mongos._run_command('balancerStatus')
             if not status['inBalancerRound']:
                 logging.info('Balancer is not in a round.')
                 break
@@ -129,3 +129,12 @@ class MongoDBCluster:
                 for collection in collection_list.collection_names():
                     coll_list.append(collection)
         return coll_list
+
+    def get_replset_config(self):
+        result = self._run_command('replSetGetConfig')
+        return result
+
+    def update_replset_config(self, replset_config=None, new_members=None):
+        replset_config['members'] = new_members
+        result = self._run_command({'replSetConfig: '})
+        return result

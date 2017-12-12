@@ -59,7 +59,7 @@ class HostConn:
         # -- grabbing mongodb mount point
         result_dbpath = self.run_command('grep -i dbpath ' + mongod_path)
         if result_dbpath[1] == 0:
-            mdb_dbpath = result_dbpath[0].strip().split(':')[1]
+            mdb_dbpath = result_dbpath[0].split(':')[1].strip()
         else:
             logging.error('Backup failed! Could not get dbpath from host ' + self.ipaddr)
             exit(1)
@@ -164,7 +164,31 @@ class HostConn:
         return result_cmd
 
     def mount_fs(self, fs_mountpoint=None, fs_type=None, device=None):
-        result_cmd = self.run_command('mount -t ' + fs_type + ' ' + device + ' ' + fs_mountpoint)
+        result_cmd = self.run_command('mount -t ' + fs_type + ' -o noatime ' + device + ' ' + fs_mountpoint)
+        return result_cmd
+
+    def get_hostname(self):
+        result_cmd = self.run_command('hostname')
+        return result_cmd
+
+    def get_iscsi_iqn(self):
+        result_cmd = self.run_command('cat /etc/iscsi/initiatorname.iscsi')
+        return result_cmd
+
+    def iscsi_rescan(self):
+        result_cmd = self.run_command('/sbin/iscsiadm -m session --rescan')
+        return result_cmd
+
+    def iscsi_send_targets(self, iscsi_target=None):
+        result_cmd = self.run_command('/sbin/iscsiadm -m discovery -t st -p ' + iscsi_target + ':3260')
+        return result_cmd
+
+    def iscsi_node_login(self):
+        result_cmd = self.run_command('/sbin/iscsiadm -m node -L all')
+        return result_cmd
+
+    def remove_file(self, filename=None):
+        result_cmd = self.run_command('/bin/rm -f ' + filename)
         return result_cmd
 
     def close(self):
