@@ -14,7 +14,7 @@ class MongoDBCluster:
             logging.error(e.message)
             exit(1)
 
-    def _run_command(self, cmd):
+    def _run_command(self, cmd=None):
         return self.conn.admin.command(cmd)
 
     def is_balancer_in_round(self):
@@ -134,7 +134,18 @@ class MongoDBCluster:
         result = self._run_command('replSetGetConfig')
         return result
 
-    def update_replset_config(self, replset_config=None, new_members=None):
-        replset_config['members'] = new_members
-        result = self._run_command({'replSetConfig: '})
+    def update_replset_config(self, replset_reconfig=None):
+        result = self.conn.admin.command('replSetReconfig', replset_reconfig, force=True)
+        return result
+
+    def delete_doc(self, dbname=None, collection=None, delete_filter=None):
+        db = self.conn[dbname]
+        coll = db[collection]
+        result = coll.delete_one(filter=delete_filter).deleted_count
+        return result
+
+    def update_doc(self, dbname=None, collection=None, update_filter=None, update_doc=None):
+        db = self.conn[dbname]
+        coll = db[collection]
+        result = coll.update_one(filter=update_filter, update=update_doc).modified_count
         return result

@@ -688,6 +688,24 @@ class SubCmdClone:
             mongo_cluster['config_servers'] = list()
             mongo_cluster['shards'] = list()
 
+            members = list()
+            count = 0
+            for clone_cs_member in self.clone_spec['config_servers']:
+                clone_member = dict()
+                clone_member['_id'] = count
+                clone_member['host'] = clone_cs_member['hostname'] + ':' + clone_cs_member['port']
+                clone_member['arbiterOnly'] = clone_cs_member['arbiter_only']
+                clone_member['buildIndexes'] = clone_cs_member['build_indexes']
+                clone_member['hidden'] = clone_cs_member['hidden']
+                clone_member['priority'] = clone_cs_member['priority']
+                clone_member['tags'] = dict()
+                clone_member['slaveDelay'] = clone_cs_member['slave_delay']
+                clone_member['votes'] = clone_cs_member['votes']
+                members.append(clone_member)
+                count = + 1
+
+            mongo_cluster['cs_reconfig_members'] = members
+
             for cs in self.clone_spec['config_servers']:
                 config_server = dict()
                 config_server['svm-name'] = cs['svm-name']
@@ -757,6 +775,28 @@ class SubCmdClone:
                 shard_replset = dict()
                 shard_replset['name'] = shard['shard_name']
                 shard_replset['members'] = list()
+
+                sh_members = list()
+                count = 0
+                for shard_member in shard['shard_members']:
+                    for bkp_shard in bkp2clone['mongo_topology']['shards']:
+                        if shard_replset['name'] == bkp_shard['shard_name']:
+                            clone_member = dict()
+                            clone_member['_id'] = count
+                            clone_member['host'] = shard_member['hostname'] + ':' + shard_member['port']
+                            clone_member['arbiterOnly'] = shard_member['arbiter_only']
+                            clone_member['buildIndexes'] = shard_member['build_indexes']
+                            clone_member['hidden'] = shard_member['hidden']
+                            clone_member['priority'] = shard_member['priority']
+                            clone_member['tags'] = dict()
+                            clone_member['slaveDelay'] = shard_member['slave_delay']
+                            clone_member['votes'] = shard_member['votes']
+                            sh_members.append(clone_member)
+                            count = + 1
+                            if count == len(shard['shard_members']):
+                                break
+
+                shard_replset['reconfig_members'] = sh_members
 
                 for shard_member in shard['shard_members']:
                     member = dict()
@@ -923,13 +963,46 @@ class SubCmdClone:
                                                                                        cs['hostname']))
                 # -- Start MongoDB on standalone mode
                 if cs['dir_per_db']:
-                    recover_mode = '/usr/bin/mongod --logpath /var/log/mongodb/mongod_recover.log --dbpath ' + cs[
-                        'mountpoint'] + ' --port ' + cs['port'] + ' --directoryperdb --fork'
+                    recover_mode = '/usr/bin/mongod --logpath /var/log/mongodb/mongod.log --dbpath ' + cs[
+                        'mountpoint'] + ' --port ' + cs['port'] + ' --replSet ' + cs['setname'] + ' --directoryperdb --fork --configsvr'
                 else:
-                    recover_mode = '/usr/bin/mongod --logpath /var/log/mongodb/mongod_recover.log --dbpath ' + cs[
-                        'mountpoint'] + ' --port ' + cs['port'] + ' --fork'
+                    recover_mode = '/usr/bin/mongod --logpath /var/log/mongodb/mongod.log --dbpath ' + cs[
+                        'mountpoint'] + ' --port ' + cs['port'] + ' --replSet ' + cs['setname'] + ' --fork --configsvr'
 
                 result = host.run_command('/sbin/runuser -l mongod -g mongod -c "' + recover_mode + '"')
+                if result[1] != 0:
+                    logging.error('Cannot start mongodb in recover mode.')
+                    exit(1)
+                else:
+                    logging.info('MongoDB has been started on host {}.'.format(cs['hostname']))
+
+                # -- Updating ReplicaSet info
+                mdb_recover_uri = 'mongodb://' + cs['hostname'] + ':' + cs['port']
+                mdb_recover_session = MongoDBCluster(mongodb_uri=mdb_recover_uri)
+                rsoldconf = mdb_recover_session.get_replset_config()
+
+                rs_newconf = rsoldconf['config']
+                rs_newconf['members'] = mongo_cluster['cs_reconfig_members']
+
+                mdb_recover_session.update_replset_config(replset_reconfig=rs_newconf)
+                sleep(10)
+
+                mdb_recover_session.delete_doc(dbname='admin', collection='system.version',
+                                               delete_filter={"_id" : "minOpTimeRecovery"})
+
+                mdb_recover_session.delete_doc(dbname='admin', collection='system.version',
+                                               delete_filter={"_id" : "shardIdentity"})
+
+                for clone_shard in self.clone_spec['shards']:
+                    shard_string = clone_shard['shard_name'] + '/'
+
+                    for clone_shard_member in clone_shard['shard_members']:
+                        shard_string = shard_string + clone_shard_member['hostname'] + ':' + clone_shard_member['port']
+
+                    mdb_recover_session.update_doc(dbname='config', collection='shards',
+                                                   update_filter={"_id": clone_shard['shard_name']},
+                                                   update_doc={"$set": {"host" : shard_string}}
+                                                   )
 
                 host.close()
 
@@ -1021,5 +1094,57 @@ class SubCmdClone:
                         logging.info('Device {} has been mounted to {} on host {}.'.format(shard_member['storage_info']['mdb_device'],
                                                                                            shard_member['mountpoint'],
                                                                                            shard_member['hostname']))
-                    host.close()
+                    # -- Start MongoDB
+                    if shard_member['dir_per_db']:
+                        recover_mode = '/usr/bin/mongod --logpath /var/log/mongodb/mongod_recover.log --dbpath ' + shard_member[
+                            'mountpoint'] + ' --port ' + shard_member['port'] + ' --replSet ' + shard['name'] + ' --directoryperdb --fork'
+                    else:
+                        recover_mode = '/usr/bin/mongod --logpath /var/log/mongodb/mongod_recover.log --dbpath ' + shard_member[
+                            'mountpoint'] + ' --port ' + shard_member['port'] + ' --replSet ' + shard['name'] + ' --fork'
 
+                    result = host.run_command('/sbin/runuser -l mongod -g mongod -c "' + recover_mode + '"')
+                    if result[1] != 0:
+                        logging.error('Cannot start mongodb in recover mode.')
+                        exit(1)
+                    else:
+                        logging.info('MongoDB has been started in recover mode on host {}.'.format(shard_member['hostname']))
+
+                    # -- Updating ReplicaSet info
+                    mdb_recover_uri = 'mongodb://' + shard_member['hostname'] + ':' + shard_member['port']
+                    mdb_recover_session = MongoDBCluster(mongodb_uri=mdb_recover_uri)
+
+                    rsoldconf = mdb_recover_session.get_replset_config()
+
+                    rs_newconf = rsoldconf['config']
+                    rs_newconf['members'] = shard['reconfig_members']
+
+                    mdb_recover_session.update_replset_config(replset_reconfig=rs_newconf)
+                    sleep(10)
+
+                    mdb_recover_session.delete_doc(dbname='admin', collection='system.version',
+                                                   delete_filter={"_id": "minOpTimeRecovery"})
+
+                    mdb_recover_session.delete_doc(dbname='admin', collection='system.version',
+                                                   delete_filter={"_id": "shardIdentity"})
+
+                    sleep(10)
+
+                    result = host.run_command('pkill mongod')
+                    if result[1] != 0:
+                        logging.error('Could not kill mongod on host {}.'.format(shard_member['hostname']))
+                        exit(1)
+                    else:
+                        logging.info('MongoDB has been stopped on host {}.'.format(shard_member['hostname']))
+
+                    result = host.run_command('rm -rf ' + shard_member['mountpoint'] + '/mongod.lock')
+                    result = host.run_command('rm -rf /var/run/mongodb/mongod.pid')
+                    sleep(5)
+
+                    result = host.start_service('mongod')
+                    if result[1] != 0:
+                        logging.error('Cannot start mongod on host {}.'.format(shard_member['hostname']))
+                        exit(1)
+                    else:
+                        logging.info('MongoDB has been started in normal mode on host {}.'.format(shard_member['hostname']))
+
+                    host.close()
