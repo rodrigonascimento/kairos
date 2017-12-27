@@ -696,13 +696,13 @@ class SubCmdClone:
                 clone_member['host'] = clone_cs_member['hostname'] + ':' + clone_cs_member['port']
                 clone_member['arbiterOnly'] = clone_cs_member['arbiter_only']
                 clone_member['buildIndexes'] = clone_cs_member['build_indexes']
-                clone_member['hidden'] = clone_cs_member['hidden']
-                clone_member['priority'] = clone_cs_member['priority']
+                clone_member['hidden'] = False
+                clone_member['priority'] = 1
                 clone_member['tags'] = dict()
-                clone_member['slaveDelay'] = clone_cs_member['slave_delay']
-                clone_member['votes'] = clone_cs_member['votes']
+                clone_member['slaveDelay'] = 0
+                clone_member['votes'] = 1
                 members.append(clone_member)
-                count = + 1
+                count += 1
 
             mongo_cluster['cs_reconfig_members'] = members
 
@@ -776,28 +776,26 @@ class SubCmdClone:
                 shard_replset['name'] = shard['shard_name']
                 shard_replset['members'] = list()
 
+                # -- preparing shard replicaset reconfig
                 sh_members = list()
                 count = 0
                 for shard_member in shard['shard_members']:
-                    for bkp_shard in bkp2clone['mongo_topology']['shards']:
-                        if shard_replset['name'] == bkp_shard['shard_name']:
-                            clone_member = dict()
-                            clone_member['_id'] = count
-                            clone_member['host'] = shard_member['hostname'] + ':' + shard_member['port']
-                            clone_member['arbiterOnly'] = shard_member['arbiter_only']
-                            clone_member['buildIndexes'] = shard_member['build_indexes']
-                            clone_member['hidden'] = shard_member['hidden']
-                            clone_member['priority'] = shard_member['priority']
-                            clone_member['tags'] = dict()
-                            clone_member['slaveDelay'] = shard_member['slave_delay']
-                            clone_member['votes'] = shard_member['votes']
-                            sh_members.append(clone_member)
-                            count = + 1
-                            if count == len(shard['shard_members']):
-                                break
+                    clone_member = dict()
+                    clone_member['_id'] = count
+                    clone_member['host'] = shard_member['hostname'] + ':' + shard_member['port']
+                    clone_member['arbiterOnly'] = shard_member['arbiter_only']
+                    clone_member['buildIndexes'] = shard_member['build_indexes']
+                    clone_member['hidden'] = False
+                    clone_member['priority'] = 1
+                    clone_member['tags'] = dict()
+                    clone_member['slaveDelay'] = 0
+                    clone_member['votes'] = 1
+                    sh_members.append(clone_member)
+                    count += 1
 
                 shard_replset['reconfig_members'] = sh_members
 
+                # -- preparing to clone volumes
                 for shard_member in shard['shard_members']:
                     member = dict()
                     member['svm-name'] = shard_member['svm-name']
@@ -858,7 +856,7 @@ class SubCmdClone:
                                     member['volclone_topology'].append(flexclone)
                                     logging.info('Volume {} ready to be cloned as {} on host {}'.format(vol['volume'],
                                                                                                         clone_spec['volume'],
-                                                                                                        cs['hostname']
+                                                                                                        shard_member['hostname']
                                                                                                         ))
                                     lun_spec = dict()
                                     lun_spec['path'] = '/vol/' + clone_spec['volume'] + '/' + vol['lun-name']
