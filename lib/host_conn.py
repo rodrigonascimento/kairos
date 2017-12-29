@@ -55,14 +55,17 @@ class HostConn:
         stderr.close()
         return (''.join(stdout_chunks), stdout.channel.recv_exit_status())
 
-    def get_storage_layout(self, mongod_path=None):
-        # -- grabbing mongodb mount point
-        result_dbpath = self.run_command('grep -i dbpath ' + mongod_path)
-        if result_dbpath[1] == 0:
-            mdb_dbpath = result_dbpath[0].split(':')[1].strip()
+    def get_storage_layout(self, mongod_path=None, mountpoint=None):
+        if mountpoint is None:
+            # -- grabbing mongodb mount point
+            result_dbpath = self.run_command('grep -i dbpath ' + mongod_path)
+            if result_dbpath[1] == 0:
+                mdb_dbpath = result_dbpath[0].split(':')[1].strip()
+            else:
+                logging.error('Could not get dbpath from host ' + self.ipaddr)
+                exit(1)
         else:
-            logging.error('Backup failed! Could not get dbpath from host ' + self.ipaddr)
-            exit(1)
+            mdb_dbpath = mountpoint
 
         # -- grabbing mongodb filesystem device
         result_fs = self.run_command('mount | grep ' + mdb_dbpath)
@@ -70,7 +73,7 @@ class HostConn:
             mdb_device = result_fs[0].split()[0]
             fs_type = result_fs[0].split()[4]
         else:
-            logging.error('Backup failed! Could not get dbpath device from host ' + self.ipaddr)
+            logging.error('Could not get dbpath device from host ' + self.ipaddr)
             exit(1)
 
         # -- Checking if the device is a single LUN or a LVM logical volume
@@ -114,7 +117,6 @@ class HostConn:
 
         doc = dict()
         doc['volume_topology'] = list()
-
         for svm_vol in svm_n_vol:
             doc['volume_topology'].append(svm_vol)
 
@@ -186,6 +188,9 @@ class HostConn:
     def iscsi_node_login(self):
         result_cmd = self.run_command('/sbin/iscsiadm -m node -L all')
         return result_cmd
+
+    def get_wwpn(self):
+        pass
 
     def remove_file(self, filename=None):
         result_cmd = self.run_command('/bin/rm -f ' + filename)

@@ -682,68 +682,103 @@ class SubCmdClone:
             logging.error('Cannot find backup {} for cluster {}.'.format(self.backup_name, self.cluster_name))
             exit(1)
 
-        # -- Preparation phase -- getting info to create igroups and flexclones
-        mongo_cluster = dict()
-        if self.clone_spec['cluster_type'] == 'sharded':
-            mongo_cluster['config_servers'] = list()
-            mongo_cluster['shards'] = list()
+        # -- checking if clone spec file has the required number of members per replicaset
+        if self.clone_spec['cluster_type'] == 'replicaSet':
+            odd_members = len(self.clone_spec['replset']['members']) / 2.0
+            if odd_members == 0:
+                logging.error('You need an odd number of members to establish a replicaSet.')
+                exit(1)
+        elif self.clone_spec['cluster_type'] == 'sharded':
+            odd_cs_members = len(self.clone_spec['config_servers']['members']) / 2.0
+            if odd_cs_members == 0:
+                logging.error('You need an odd number of members to establish a CSRS.')
+                exit(1)
 
-            members = list()
+            for shard in self.clone_spec['shards']:
+                odd_sh_members = len(shard['shard_members']) / 2.0
+                if odd_sh_members == 0:
+                    logging.error('You need an odd number of members to establish a shard.')
+                    exit(1)
+
+        # -- cloned cluster structure
+        cloned_cluster = dict()
+        cloned_cluster['cluster_type'] = self.clone_spec['cluster_type']
+        if self.clone_spec['cluster_type'] == 'replicaSet':
+            cloned_cluster['setname'] = self.clone_spec['replset']['setname']
+            cloned_cluster['members'] = list()
+            cloned_cluster['reconfig'] = dict()
+        elif self.clone_spec['cluster_type'] == 'sharded':
+            cloned_cluster['config_servers'] = dict()
+            cloned_cluster['config_servers']['setname'] = self.clone_spec['config_servers']['setname']
+            cloned_cluster['config_servers']['members'] = list()
+            cloned_cluster['config_servers']['reconfig'] = dict()
+            cloned_cluster['shards'] = list()
+
+        # -- replicaSet and shard reconfig -- rc stands for reconfig
+        # -- cc_cs stands for cloned_cluster config server
+        # -- cc_sh stands for cloned_cluster shard
+        if self.clone_spec['cluster_type'] == 'replicaSet':
             count = 0
-            for clone_cs_member in self.clone_spec['config_servers']:
-                clone_member = dict()
-                clone_member['_id'] = count
-                clone_member['host'] = clone_cs_member['hostname'] + ':' + clone_cs_member['port']
-                clone_member['arbiterOnly'] = clone_cs_member['arbiter_only']
-                clone_member['buildIndexes'] = clone_cs_member['build_indexes']
-                clone_member['hidden'] = False
-                clone_member['priority'] = 1
-                clone_member['tags'] = dict()
-                clone_member['slaveDelay'] = 0
-                clone_member['votes'] = 1
-                members.append(clone_member)
+            rc_members = dict()
+            for spec_member in self.clone_spec['replset']['members']:
+                rc_members['members.' + str(count) + '.host'] = spec_member['hostname'] + ':' + spec_member['port']
+                rc_members['members.' + str(count) + '.arbiterOnly'] = spec_member['arbiter_only']
                 count += 1
+            cloned_cluster['reconfig'] = rc_members
+        elif self.clone_spec['cluster_type'] == 'sharded':
+            # -- config server reconfig
+            count = 0
+            rc_cs_members = dict()
+            for spec_cs_member in self.clone_spec['config_servers']['members']:
+                rc_cs_members['members.' + str(count) + '._id'] = count
+                rc_cs_members['members.' + str(count) + '.host'] = spec_cs_member['hostname'] + ':' + \
+                                                                  spec_cs_member['port']
+                rc_cs_members['members.' + str(count) + '.arbiterOnly'] = spec_cs_member['arbiter_only']
+                rc_cs_members['members.' + str(count) + '.buildIndexes'] = True
+                rc_cs_members['members.' + str(count) + '.hidden'] = False
+                rc_cs_members['members.' + str(count) + '.priority'] = 1
+                rc_cs_members['members.' + str(count) + '.tags'] = dict()
+                rc_cs_members['members.' + str(count) + '.slaveDelay'] = 0
+                rc_cs_members['members.' + str(count) + '.votes'] = 1
+                count += 1
+            cloned_cluster['config_servers']['reconfig'] = rc_cs_members
 
-            mongo_cluster['cs_reconfig_members'] = members
+        # -- Stage 1 :: Setting it up -------------------
+        if self.clone_spec['cluster_type'] == 'sharded':
+            for spec_cs_member in self.clone_spec['config_servers']['members']:
+                if spec_cs_member['arbiter_only']:
+                    cloned_cluster['config_servers']['members'].append(spec_cs_member)
+                    continue
 
-            for cs in self.clone_spec['config_servers']:
-                config_server = dict()
-                config_server['svm-name'] = cs['svm-name']
-                config_server['hostname'] = cs['hostname']
-                config_server['mountpoint'] = cs['mountpoint']
-                config_server['iscsi_target'] = cs['iscsi_target']
-                config_server['port'] = cs['port']
-                config_server['setname'] = cs['setname']
-                config_server['dir_per_db'] = cs['dir_per_db']
+                config_server = spec_cs_member
 
-                host = HostConn(ipaddr=cs['hostname'], username=self.username)
-
+                host = HostConn(ipaddr=spec_cs_member['hostname'], username=self.username)
+                
                 igroup_spec = dict()
                 result_get_hostname = host.get_hostname()
-                if result_get_hostname[1] == 0:
-                    logging.info('Preparing initiator group for host {}.'.format(cs['hostname']))
-                    igroup_spec['igroup-name'] = 'ig_' + result_get_hostname[0].strip('\n') + '_' + self.clone_name
-                    igroup_spec['igroup-type'] = cs['protocol']
-                    igroup_spec['os-type'] = 'linux'
-                    if cs['protocol'] == 'iscsi':
-                        result_get_initiator = host.get_iscsi_iqn()
-                        if result_get_initiator[1] == 0:
-                            logging.info('Collecting initiator information on host {}.'.format(cs['hostname']))
-                            initiator = result_get_initiator[0].split('=')[1].strip()
-                            config_server['igroup'] = InitiatorGroup(igroup_spec)
-                            config_server['initiator'] = initiator
-                            host.close()
-                        else:
-                            logging.error('Could not get initiator from host {}.'.format(cs['hostname']))
-                            exit(1)
-                else:
-                    logging.error('Cannot get hostname from host {}.'.format(cs['hostname']))
+                if result_get_hostname[1] != 0:
+                    logging.error('Could not get hostname from host {}.'.format(spec_cs_member['hostname']))
                     exit(1)
+                else:
+                    logging.info('Preparing initiator group for host {}.'.format(spec_cs_member['hostname']))
+                    igroup_spec['igroup-name'] = 'ig_' + result_get_hostname[0].strip('\n') + '_' + self.clone_name
+                    igroup_spec['igroup-type'] = spec_cs_member['protocol']
+                    igroup_spec['os-type'] = 'linux'
+                    if spec_cs_member['protocol'] == 'iscsi':
+                        result_get_iqn = host.get_iscsi_iqn()
+                        if result_get_iqn[1] != 0:
+                            logging.error('Could not get initiator name from host {}.'.format(spec_cs_member['hostname']))
+                            exit(1)
+                        else:
+                            logging.info('Collecting initiator name on host {}.'.format(spec_cs_member['hostname']))
+                            config_server['initiator'] = result_get_iqn[0].split('=')[1].strip()
+                            config_server['igroup'] = InitiatorGroup(igroup_spec)
+                    host.close()
 
                 config_server['volclone_topology'] = list()
                 config_server['lun_mapping'] = list()
                 for bkp_cs in bkp2clone['mongo_topology']['config_servers']:
-                    if bkp_cs['stateStr'] == cs['clone_from'].upper():
+                    if bkp_cs['stateStr'] == spec_cs_member['clone_from'].upper():
                         config_server['storage_info'] = dict()
                         config_server['storage_info']['lvm_vgname'] = bkp_cs['storage_info']['lvm_vgname']
                         config_server['storage_info']['fs_type'] = bkp_cs['storage_info']['fs_type']
@@ -757,7 +792,7 @@ class SubCmdClone:
                             config_server['volclone_topology'].append(flexclone)
                             logging.info('Volume {} ready to be cloned as {} on host {}'.format(vol['volume'],
                                                                                                 clone_spec['volume'],
-                                                                                                cs['hostname']
+                                                                                                spec_cs_member['hostname']
                                                                                                 ))
                             lun_spec = dict()
                             lun_spec['path'] = '/vol/' + clone_spec['volume'] + '/' + vol['lun-name']
@@ -767,83 +802,81 @@ class SubCmdClone:
                             logging.info('Preparing LUN {} to be mapped to igroup {}.'.format(lun_spec['path'],
                                                                                               lun_spec['igroup-name']
                                                                                               ))
-                        break
-
-                mongo_cluster['config_servers'].append(config_server)
-
-            for shard in self.clone_spec['shards']:
+                        break                
+                
+                cloned_cluster['config_servers']['members'].append(config_server)
+            
+            for spec_shard in self.clone_spec['shards']:
                 shard_replset = dict()
-                shard_replset['name'] = shard['shard_name']
+                shard_replset['name'] = spec_shard['shard_name']
                 shard_replset['members'] = list()
-
-                # -- preparing shard replicaset reconfig
-                sh_members = list()
+                shard_replset['reconfig'] = dict()
+                
+                # -- preparing shard replicaset reconfig document
                 count = 0
-                for shard_member in shard['shard_members']:
-                    clone_member = dict()
-                    clone_member['_id'] = count
-                    clone_member['host'] = shard_member['hostname'] + ':' + shard_member['port']
-                    clone_member['arbiterOnly'] = shard_member['arbiter_only']
-                    clone_member['buildIndexes'] = shard_member['build_indexes']
-                    clone_member['hidden'] = False
-                    clone_member['priority'] = 1
-                    clone_member['tags'] = dict()
-                    clone_member['slaveDelay'] = 0
-                    clone_member['votes'] = 1
-                    sh_members.append(clone_member)
+                rc_sh_members = dict()
+                for spec_sh_member in spec_shard['shard_members']:
+                    rc_sh_members['members.' + str(count) + '._id'] = count
+                    rc_sh_members['members.' + str(count) + '.host'] = spec_sh_member['hostname'] + ':' + \
+                                                                       spec_sh_member['port']
+                    rc_sh_members['members.' + str(count) + '.arbiterOnly'] = spec_sh_member['arbiter_only']
+                    rc_sh_members['members.' + str(count) + '.buildIndexes'] = True
+                    rc_sh_members['members.' + str(count) + '.hidden'] = False
+                    rc_sh_members['members.' + str(count) + '.priority'] = 1
+                    rc_sh_members['members.' + str(count) + '.tags'] = dict()
+                    rc_sh_members['members.' + str(count) + '.slaveDelay'] = 0
+                    rc_sh_members['members.' + str(count) + '.votes'] = 1
                     count += 1
 
-                shard_replset['reconfig_members'] = sh_members
-
-                # -- preparing to clone volumes
-                for shard_member in shard['shard_members']:
+                shard_replset['reconfig'] = rc_sh_members
+                
+                for spec_sh_member in spec_shard['shard_members']:
                     member = dict()
-                    member['svm-name'] = shard_member['svm-name']
-                    member['hostname'] = shard_member['hostname']
-                    member['mountpoint'] = shard_member['mountpoint']
-                    member['iscsi_target'] = shard_member['iscsi_target']
-                    member['port'] = shard_member['port']
-                    member['dir_per_db'] = shard_member['dir_per_db']
-
-                    host = HostConn(ipaddr=member['hostname'], username=self.username)
-
+                    if spec_sh_member['arbiter_only']:
+                        shard_replset['members'].append(spec_sh_member)
+                        continue
+                    
+                    member = spec_sh_member
+                    
+                    host = HostConn(ipaddr=spec_sh_member['hostname'], username=self.username)
+                    
                     igroup_spec = dict()
                     result_get_hostname = host.get_hostname()
-                    if result_get_hostname[1] == 0:
-                        logging.info('Preparing initiator group for host {}.'.format(shard_member['hostname']))
-                        igroup_spec['igroup-name'] = 'ig_' + result_get_hostname[0].strip('\n') + '_' + self.clone_name
-                        igroup_spec['igroup-type'] = shard_member['protocol']
-                        igroup_spec['os-type'] = 'linux'
-                        if shard_member['protocol'] == 'iscsi':
-                            result_get_initiator = host.get_iscsi_iqn()
-                            if result_get_initiator[1] == 0:
-                                logging.info('Collecting initiator information on host {}.'.format(shard_member['hostname']))
-                                initiator = result_get_initiator[0].split('=')[1].strip()
-                                member['igroup'] = InitiatorGroup(igroup_spec)
-                                member['initiator'] = initiator
-                                host.close()
-                            else:
-                                logging.error('Could not get initiator from host {}.'.format(member['hostname']))
-                                exit(1)
-                    else:
-                        logging.error('Cannot get hostname from host {}.'.format(member['hostname']))
+                    if result_get_hostname[1] != 0:
+                        logging.error('Could not get hostname from host {}.'.format(spec_sh_member['hostname']))
                         exit(1)
+                    else:
+                        logging.info('Preparing initiator group for host {}.'.format(spec_sh_member['hostname']))
+                        igroup_spec['igroup-name'] = 'ig_' + result_get_hostname[0].strip('\n') + '_' + self.clone_name
+                        igroup_spec['igroup-type'] = spec_sh_member['protocol']
+                        igroup_spec['os-type'] = 'linux'
+                        if spec_sh_member['protocol'] == 'iscsi':
+                            result_get_iqn = host.get_iscsi_iqn()
+                            if result_get_iqn[1] != 0:
+                                logging.error('Could not get initiator name from host {}.'.format(spec_sh_member['hostname']))
+                                exit(1)
+                            else:
+                                logging.info('Collecting initiator name on host {}.'.format(spec_sh_member['hostname']))
+                                member['initiator'] = result_get_iqn[0].split('=')[1].strip()
+                                member['igroup'] = InitiatorGroup(igroup_spec)
+                        host.close()
 
                     member['volclone_topology'] = list()
                     member['lun_mapping'] = list()
                     for bkp_shard in bkp2clone['mongo_topology']['shards']:
                         for bkp_shard_member in bkp_shard['shard_members']:
-                            if bkp_shard_member['stateStr'] == shard_member['clone_from'].upper() and bkp_shard['shard_name'] == shard['shard_name']:
+                            if (bkp_shard_member['stateStr'] == spec_sh_member['clone_from'].upper()) and (
+                                    bkp_shard['shard_name'] == spec_shard['shard_name']):
                                 member['storage_info'] = dict()
                                 member['storage_info']['lvm_vgname'] = bkp_shard_member['storage_info']['lvm_vgname']
                                 member['storage_info']['fs_type'] = bkp_shard_member['storage_info']['fs_type']
                                 member['storage_info']['mdb_device'] = bkp_shard_member['storage_info']['mdb_device']
 
                                 for vol in bkp_shard_member['storage_info']['volume_topology']:
-                                    if vol['svm-name'] != shard_member['svm-name']:
+                                    if vol['svm-name'] != spec_sh_member['svm-name']:
                                         logging.error('You are asking a clone from a {} member on svm {}, but there is no {} on svm {} for shard {} on backup {}'.format(
-                                                     shard_member['clone_from'], shard_member['svm-name'], shard_member['clone_from'],
-                                                     shard_member['svm-name'], shard['shard_name'], self.backup_name
+                                                     spec_sh_member['clone_from'], spec_sh_member['svm-name'], spec_sh_member['clone_from'],
+                                                     spec_sh_member['svm-name'], shard['shard_name'], self.backup_name
                                                      ))
                                         exit(1)
 
@@ -856,7 +889,7 @@ class SubCmdClone:
                                     member['volclone_topology'].append(flexclone)
                                     logging.info('Volume {} ready to be cloned as {} on host {}'.format(vol['volume'],
                                                                                                         clone_spec['volume'],
-                                                                                                        shard_member['hostname']
+                                                                                                        spec_sh_member['hostname']
                                                                                                         ))
                                     lun_spec = dict()
                                     lun_spec['path'] = '/vol/' + clone_spec['volume'] + '/' + vol['lun-name']
@@ -869,10 +902,84 @@ class SubCmdClone:
                                 shard_replset['members'].append(member)
                                 break
 
-                mongo_cluster['shards'].append(shard_replset)
+                cloned_cluster['shards'].append(shard_replset)
 
-            # -- Execution phase
-            for cs in mongo_cluster['config_servers']:
+            # -- Stage 2 :: Executing it
+            # -- running steps to clone config servers
+            for cs in cloned_cluster['config_servers']['members']:
+                # -- Preparing recover and normal mode start string
+                if self.clone_spec['defaults']['dir_per_db']:
+                    recover_mode = '/usr/bin/mongod --logpath ' + self.clone_spec['defaults']['log_path'] + \
+                                   ' --dbpath ' + cs['mountpoint'] + ' --bind_ip ' + cs['hostname'] + ' --port ' + \
+                                   cs['port'] + ' --fork --directoryperdb'
+                    normal_mode = '/usr/bin/mongod --logpath ' + self.clone_spec['defaults']['log_path'] + \
+                                  ' --dbpath ' + cs['mountpoint'] + ' --bind_ip ' + cs['hostname'] + ' --port ' + \
+                                  cs['port'] + ' --replSet ' + cloned_cluster['config_servers']['setname'] + \
+                                  ' --fork --directoryperdb --configsvr'
+                else:
+                    recover_mode = '/usr/bin/mongod --logpath ' + self.clone_spec['defaults']['log_path'] + \
+                                   ' --dbpath ' + cs['mountpoint'] + ' --bind_ip ' + cs['hostname'] + ' --port ' + \
+                                   cs['port'] + ' --fork'
+                    normal_mode = '/usr/bin/mongod --logpath ' + self.clone_spec['defaults']['log_path'] + \
+                                  ' --dbpath ' + cs['mountpoint'] + ' --bind_ip ' + cs['hostname'] + ' --port ' + \
+                                  cs['port'] + ' --replSet ' + cloned_cluster['config_servers']['setname'] + \
+                                  ' --fork --configsvr'
+
+                # -- openning a ssh connection to run host side commands
+                host = HostConn(ipaddr=cs['hostname'], username=self.username)
+
+                # -- if member is only an arbiter, there isn't any netapp action to be taken.
+                if cs['arbiter_only']:
+                    # -- removing mongod.lock and mongod.pid
+                    host.remove_file(cs['mountpoint'] + '/mongod.lock')
+                    host.remove_file('/var/run/mongodb/mongod.pid')
+
+                    result = host.run_command('/sbin/runuser -l mongod -g mongod -c "' + recover_mode + '"')
+                    if result[1] != 0:
+                        logging.error('Cannot start mongodb in recover mode on host {}.'.format(cs['hostname']))
+                        exit(1)
+                    else:
+                        logging.info('MongoDB has been started in recover mode on host {}.'.format(cs['hostname']))
+
+                    # -- Updating ReplicaSet info
+                    mdb_uri = 'mongodb://' + cs['hostname'] + ':' + cs['port']
+                    mdb_session = MongoDBCluster(mongodb_uri=mdb_uri)
+                    mdb_session.update_doc(dbname='local', collection='system.replset',
+                                           update_filter={'_id': cloned_cluster['config_servers']['setname']},
+                                           update_doc={'$unset': {'members': ''}}
+                                           )
+                    mdb_session.update_doc(dbname='local', collection='system.replset',
+                                           update_filter={'_id': cloned_cluster['config_servers']['setname']},
+                                           update_doc={'$set': {'members': []}}
+                                           )
+                    mdb_session.update_doc(dbname='local', collection='system.replset',
+                                           update_filter={'_id': cloned_cluster['config_servers']['setname']},
+                                           update_doc={'$set': cloned_cluster['config_servers']['reconfig']}
+                                           )
+
+                    # -- Stopping MongoDB recover mode
+                    result = host.run_command('pkill mongod')
+                    if result[1] != 0:
+                        logging.error('Cannot kill mongoDB on host {}'.format(cs['hostname']))
+                        exit(1)
+                    else:
+                        logging.info('MongoDB has been stopped on host {}.'.format(cs['hostname']))
+                        host.remove_file(cs['mountpoint'] + '/mongod.lock')
+                        host.remove_file('/var/run/mongodb/mongod.pid')
+
+                    sleep(5)
+
+                    # -- Starting MongoDB normal mode
+                    result = host.run_command('/sbin/runuser -l mongod -g mongod -c "' + normal_mode + '"')
+                    if result[1] != 0:
+                        logging.error('Cannot start mongodb in normal mode on host {}.'.format(cs['hostname']))
+                        exit(1)
+                    else:
+                        logging.info('MongoDB has been started in normal mode on host {}.'.format(cs['hostname']))
+                        host.close()
+
+                    continue
+
                 kdb_ntapsys = kdb_session['ntapsystems']
                 ntapsys = kdb_ntapsys.find_one({'svm-name': cs['svm-name']})
                 if ntapsys is None:
@@ -883,53 +990,59 @@ class SubCmdClone:
                                              password=ntapsys['password'], vserver=ntapsys['svm-name'])
 
                 result = cs['igroup'].create(svm=svm_session)
-                if result[0] == 'passed':
-                    logging.info('Initiator group {} has been created.'.format(cs['igroup'].initiator_group_name))
-                    result = cs['igroup'].add_initiators(svm=svm_session, initiator_list=cs['initiator'])
-                    if result[0] == 'passed':
-                        logging.info('Initiator {} has been added to {}.'.format(cs['initiator'], cs['igroup'].initiator_group_name))
-                    else:
-                        logging.error('Failed to add initiator {} to igroup {}.'.format(cs['igroup'].initiator_group_name, cs['initiator']))
-                        exit(1)
-                else:
-                    logging.error('Failed to create initiator group {}.'.format(cs['igroup'].initiator_group_name))
+                if result[0] == 'failed':
+                    logging.error('Failed to create initiator group {} for host {}.'.format(cs['igroup'].initiator_group_name,
+                                                                                            cs['hostname']))
                     exit(1)
-
+                else:
+                    logging.info('Initiator group {} has been created for host {}.'.format(cs['igroup'].initiator_group_name,
+                                                                                           cs['hostname']))
+                    result = cs['igroup'].add_initiators(svm=svm_session, initiator_list=cs['initiator'])
+                    if result[0] == 'failed':
+                        logging.error('Failed to add initiator {} to igroup {} for host {}.'.format(cs['initiator'],
+                                                                                                    cs['igroup'].initiator_group_name,
+                                                                                                    cs['hostname']))
+                        exit(1)
+                    else:
+                        logging.info('Initiator {} has been added to {} for host {}.'.format(cs['initiator'],
+                                                                                             cs['igroup'].initiator_group_name,
+                                                                                             cs['hostname']))
                 for volclone in cs['volclone_topology']:
                     result = volclone.create(svm=svm_session)
-                    if result[0] == 'passed':
-                        logging.info('FlexClone {} has been created.'.format(volclone.volume))
-                    else:
-                        logging.error('Failed to create flexclone {}.'.format(volclone.volume))
+                    if result[0] == 'failed':
+                        logging.error('Failed to create flexclone {} for host {}.'.format(volclone.volume,
+                                                                                          cs['hostname']))
                         exit(1)
+                    else:
+                        logging.info('FlexClone {} has been created.'.format(volclone.volume))
 
                 for lun in cs['lun_mapping']:
                     result = lun.mapping(svm=svm_session)
-                    if result[0] == 'passed':
-                        logging.info('LUN {} has been mapped to igroup {}.'.format(lun.path, lun.igroup_name))
-                    else:
-                        logging.error('Failed to map LUN {} to igroup {}.'.format(lun.path, lun.igroup_name))
+                    if result[0] == 'failed':
+                        logging.error('Failed to map LUN {} to igroup {} for host {}.'.format(lun.path,
+                                                                                              lun.igroup_name,
+                                                                                              cs['hostname']))
                         exit(1)
-
-                # -- openning ssh connection to execute host side commands
-                host = HostConn(ipaddr=cs['hostname'], username=self.username)
+                    else:
+                        logging.info('LUN {} has been mapped to igroup {} for host {}.'.format(lun.path,
+                                                                                               lun.igroup_name,
+                                                                                               cs['hostname']))
 
                 result = host.iscsi_send_targets(iscsi_target=cs['iscsi_target'])
                 if result[1] != 0:
-                    logging.error('{} on host {}.'.format(result[0], cs['hostname']))
+                    logging.error('{} on host {}'.format(result[0], cs['hostname']))
                     exit(1)
                 else:
-                    logging.info('Discovering targets for {} on host {}.'.format(cs['iscsi_target'],
-                                                                                 cs['hostname']))
+                    logging.info('Discovering targets on {} for host {}.'.format(cs['iscsi_target'], cs['hostname']))
 
                 result = host.iscsi_node_login()
                 if result[1] != 0:
                     logging.error('{} on host {}.'.format(result[0], cs['hostname']))
                     exit(1)
                 else:
-                    logging.info('Logged in to ISCSI targets and ready to rescan devices on host {}.'.format(cs['hostname']))
+                    logging.info('Logged in to {} targets and ready to rescan devices on host {}.'.format(cs['igroup'].initiator_group_type,
+                                                                                                          cs['hostname']))
 
-                # -- rescanning disk devices
                 result = host.iscsi_rescan()
                 if result[1] != 0:
                     logging.error('Could not rescan {} devices on host {}.'.format(cs['igroup'].initiator_group_type,
@@ -938,17 +1051,16 @@ class SubCmdClone:
                 else:
                     logging.info('{} devices have been scanned on host {}.'.format(cs['igroup'].initiator_group_type,
                                                                                    cs['hostname']))
-                # -- Activating volume group
+
                 result = host.enable_vg(vg_name=cs['storage_info']['lvm_vgname'])
                 if result[1] != 0:
-                    logging.error('Could not enable volume group {} on host {}'.format(cs['storage_info']['lvm_vgname'],
-                                                                                       cs['hostname']))
+                    logging.error('Could not enable volume group {} on host {}.'.format(cs['storage_info']['lvm_vgname'],
+                                                                                        cs['hostname']))
                     exit(1)
                 else:
                     logging.info('Volume Group {} has been activated on host {}.'.format(cs['storage_info']['lvm_vgname'],
                                                                                          cs['hostname']))
 
-                # -- Mounting file system
                 result = host.mount_fs(fs_mountpoint=cs['mountpoint'], fs_type=cs['storage_info']['fs_type'],
                                        device=cs['storage_info']['mdb_device'])
                 if result[1] != 0:
@@ -959,129 +1071,235 @@ class SubCmdClone:
                     logging.info('Device {} has been mounted to {} on host {}.'.format(cs['storage_info']['mdb_device'],
                                                                                        cs['mountpoint'],
                                                                                        cs['hostname']))
-                # -- Start MongoDB on standalone mode
-                if cs['dir_per_db']:
-                    recover_mode = '/usr/bin/mongod --logpath /var/log/mongodb/mongod.log --dbpath ' + cs[
-                        'mountpoint'] + ' --port ' + cs['port'] + ' --replSet ' + cs['setname'] + ' --directoryperdb --fork --configsvr'
-                else:
-                    recover_mode = '/usr/bin/mongod --logpath /var/log/mongodb/mongod.log --dbpath ' + cs[
-                        'mountpoint'] + ' --port ' + cs['port'] + ' --replSet ' + cs['setname'] + ' --fork --configsvr'
 
+                # -- Starting MongoDB on recover mode
                 result = host.run_command('/sbin/runuser -l mongod -g mongod -c "' + recover_mode + '"')
                 if result[1] != 0:
-                    logging.error('Cannot start mongodb in recover mode.')
+                    logging.error('Cannot start mongodb in recover mode on host {}.'.format(cs['hostname']))
                     exit(1)
                 else:
-                    logging.info('MongoDB has been started on host {}.'.format(cs['hostname']))
+                    logging.info('MongoDB has been started in recover mode on host {}.'.format(cs['hostname']))
 
                 # -- Updating ReplicaSet info
-                mdb_recover_uri = 'mongodb://' + cs['hostname'] + ':' + cs['port']
-                mdb_recover_session = MongoDBCluster(mongodb_uri=mdb_recover_uri)
-                rsoldconf = mdb_recover_session.get_replset_config()
+                mdb_uri = 'mongodb://' + cs['hostname'] + ':' + cs['port']
+                mdb_session = MongoDBCluster(mongodb_uri=mdb_uri)
+                mdb_session.update_doc(dbname='local', collection='system.replset',
+                                       update_filter={'_id': cloned_cluster['config_servers']['setname']},
+                                       update_doc={'$unset': {'members': ''}}
+                                       )
+                mdb_session.update_doc(dbname='local', collection='system.replset',
+                                       update_filter={'_id': cloned_cluster['config_servers']['setname']},
+                                       update_doc={'$set': {'members': []}}
+                                       )
+                mdb_session.update_doc(dbname='local', collection='system.replset',
+                                       update_filter={'_id': cloned_cluster['config_servers']['setname']},
+                                       update_doc={'$set': cloned_cluster['config_servers']['reconfig']}
+                                       )
 
-                rs_newconf = rsoldconf['config']
-                rs_newconf['members'] = mongo_cluster['cs_reconfig_members']
+                mdb_session.delete_doc(dbname='admin', collection='system.version',
+                                       delete_filter={'_id': 'minOpTimeRecovery'})
 
-                mdb_recover_session.update_replset_config(replset_reconfig=rs_newconf)
-                sleep(10)
+                for spec_shard in self.clone_spec['shards']:
+                    shard_string = spec_shard['shard_name'] + '/'
+                    count = 1
+                    for spec_sh_member in spec_shard['shard_members']:
+                        if count < len(spec_shard['shard_members']):
+                            shard_string += spec_sh_member['hostname'] + ':' + spec_sh_member['port'] + ','
+                        elif count == len(spec_shard['shard_members']):
+                            shard_string += spec_sh_member['hostname'] + ':' + spec_sh_member['port']
+                        count += 1
 
-                mdb_recover_session.delete_doc(dbname='admin', collection='system.version',
-                                               delete_filter={"_id" : "minOpTimeRecovery"})
+                    mdb_session.update_doc(dbname='config', collection='shards', 
+                                           update_filter={'_id': spec_shard['shard_name']},
+                                           update_doc={'$set': {'host': shard_string}})
 
-                mdb_recover_session.delete_doc(dbname='admin', collection='system.version',
-                                               delete_filter={"_id" : "shardIdentity"})
+                # -- Stopping MongoDB recover mode
+                result = host.run_command('pkill mongod')
+                if result[1] != 0:
+                    logging.error('Cannot kill mongoDB on host {}'.format(cs['hostname']))
+                    exit(1)
+                else:
+                    logging.info('MongoDB has been stopped on host {}.'.format(cs['hostname']))
+                    host.remove_file(cs['mountpoint'] + '/mongod.lock')
+                    host.remove_file('/var/run/mongodb/mongod.pid')
 
-                for clone_shard in self.clone_spec['shards']:
-                    shard_string = clone_shard['shard_name'] + '/'
+                sleep(5)
 
-                    for clone_shard_member in clone_shard['shard_members']:
-                        shard_string = shard_string + clone_shard_member['hostname'] + ':' + clone_shard_member['port']
+                # -- Starting MongoDB normal mode
+                result = host.run_command('/sbin/runuser -l mongod -g mongod -c "' + normal_mode + '"')
+                if result[1] != 0:
+                    logging.error('Cannot start mongodb in normal mode on host {}.'.format(cs['hostname']))
+                    exit(1)
+                else:
+                    logging.info('MongoDB has been started in normal mode on host {}.'.format(cs['hostname']))
+                    host.close()
 
-                    mdb_recover_session.update_doc(dbname='config', collection='shards',
-                                                   update_filter={"_id": clone_shard['shard_name']},
-                                                   update_doc={"$set": {"host" : shard_string}}
-                                                   )
-
-                host.close()
-
-            for shard in mongo_cluster['shards']:
+            # -- running steps to clone shards
+            for shard in cloned_cluster['shards']:
                 for shard_member in shard['members']:
+                    # -- Preparing recover and normal mode start string
+                    if self.clone_spec['defaults']['dir_per_db']:
+                        recover_mode = '/usr/bin/mongod --logpath ' + self.clone_spec['defaults']['log_path'] + \
+                                       ' --dbpath ' + shard_member['mountpoint'] + ' --bind_ip ' + shard_member['hostname'] + ' --port ' + \
+                                       shard_member['port'] + ' --fork --directoryperdb'
+                        normal_mode = '/usr/bin/mongod --logpath ' + self.clone_spec['defaults']['log_path'] + \
+                                      ' --dbpath ' + shard_member['mountpoint'] + ' --bind_ip ' + shard_member['hostname'] + ' --port ' + \
+                                      shard_member['port'] + ' --replSet ' + shard['name'] + \
+                                      ' --fork --directoryperdb --shardsvr'
+                    else:
+                        recover_mode = '/usr/bin/mongod --logpath ' + self.clone_spec['defaults']['log_path'] + \
+                                       ' --dbpath ' + shard_member['mountpoint'] + ' --bind_ip ' + shard_member['hostname'] + ' --port ' + \
+                                       shard_member['port'] + ' --fork'
+                        normal_mode = '/usr/bin/mongod --logpath ' + self.clone_spec['defaults']['log_path'] + \
+                                      ' --dbpath ' + shard_member['mountpoint'] + ' --bind_ip ' + shard_member['hostname'] + ' --port ' + \
+                                      shard_member['port'] + ' --replSet ' + shard['name'] + ' --fork --shardsvr'
+
+                    # -- openning a ssh connection to run host side commands
+                    host = HostConn(ipaddr=shard_member['hostname'], username=self.username)
+
+                    # -- if member is only an arbiter, there isn't any netapp action to be taken.
+                    if shard_member['arbiter_only']:
+                        # -- removing mongod.lock and mongod.pid
+                        host.remove_file(shard_member['mountpoint'] + '/mongod.lock')
+                        host.remove_file('/var/run/mongodb/mongod.pid')
+
+                        result = host.run_command('/sbin/runuser -l mongod -g mongod -c "' + recover_mode + '"')
+                        if result[1] != 0:
+                            logging.error('Cannot start mongodb in recover mode on host {}.'.format(shard_member['hostname']))
+                            exit(1)
+                        else:
+                            logging.info('MongoDB has been started in recover mode on host {}.'.format(shard_member['hostname']))
+
+                        # -- Updating ReplicaSet info
+                        mdb_uri = 'mongodb://' + shard_member['hostname'] + ':' + shard_member['port']
+                        mdb_session = MongoDBCluster(mongodb_uri=mdb_uri)
+                        mdb_session.update_doc(dbname='local', collection='system.replset',
+                                               update_filter={'_id': shard['name']},
+                                               update_doc={'$unset': {'members': ''}}
+                                               )
+                        mdb_session.update_doc(dbname='local', collection='system.replset',
+                                               update_filter={'_id': shard['name']},
+                                               update_doc={'$set': { 'members': []}}
+                                               )
+                        mdb_session.update_doc(dbname='local', collection='system.replset',
+                                               update_filter={'_id': shard['name']},
+                                               update_doc={'$set': shard['reconfig']}
+                                               )
+
+                        # -- Stopping MongoDB recover mode
+                        result = host.run_command('pkill mongod')
+                        if result[1] != 0:
+                            logging.error('Cannot kill mongoDB on host {}'.format(shard_member['hostname']))
+                            exit(1)
+                        else:
+                            logging.info('MongoDB has been stopped on host {}.'.format(shard_member['hostname']))
+                            host.remove_file(shard_member['mountpoint'] + '/mongod.lock')
+                            host.remove_file('/var/run/mongodb/mongod.pid')
+
+                        sleep(5)
+
+                        # -- Starting MongoDB normal mode
+                        result = host.run_command('/sbin/runuser -l mongod -g mongod -c "' + normal_mode + '"')
+                        if result[1] != 0:
+                            logging.error('Cannot start mongodb in normal mode on host {}.'.format(shard_member['hostname']))
+                            exit(1)
+                        else:
+                            logging.info('MongoDB has been started in normal mode on host {}.'.format(shard_member['hostname']))
+                            host.close()
+
+                        continue
+
                     kdb_ntapsys = kdb_session['ntapsystems']
                     ntapsys = kdb_ntapsys.find_one({'svm-name': shard_member['svm-name']})
                     if ntapsys is None:
                         logging.error('Cannot find SVM {} in the netapp repository collection.'.format(shard_member['svm-name']))
                         exit(1)
-    
+
                     svm_session = ClusterSession(cluster_ip=ntapsys['netapp-ip'], user=ntapsys['username'],
                                                  password=ntapsys['password'], vserver=ntapsys['svm-name'])
-    
-                    result = shard_member['igroup'].create(svm=svm_session)
-                    if result[0] == 'passed':
-                        logging.info('Initiator group {} has been created.'.format(shard_member['igroup'].initiator_group_name))
-                        result = shard_member['igroup'].add_initiators(svm=svm_session, initiator_list=shard_member['initiator'])
-                        if result[0] == 'passed':
-                            logging.info('Initiator {} has been added to {}.'.format(shard_member['initiator'], shard_member['igroup'].initiator_group_name))
-                        else:
-                            logging.error('Failed to add initiator {} to igroup {}.'.format(shard_member['igroup'].initiator_group_name, shard_member['initiator']))
-                            exit(1)
-                    else:
-                        logging.error('Failed to create initiator group {}.'.format(shard_member['igroup'].initiator_group_name))
-                        exit(1)
 
+                    result = shard_member['igroup'].create(svm=svm_session)
+                    if result[0] == 'failed':
+                        logging.error(
+                            'Failed to create initiator group {} for host {}.'.format(shard_member['igroup'].initiator_group_name,
+                                                                                      shard_member['hostname']))
+                        exit(1)
+                    else:
+                        logging.info(
+                            'Initiator group {} has been created for host {}.'.format(shard_member['igroup'].initiator_group_name,
+                                                                                      shard_member['hostname']))
+                        result = shard_member['igroup'].add_initiators(svm=svm_session, initiator_list=shard_member['initiator'])
+                        if result[0] == 'failed':
+                            logging.error('Failed to add initiator {} to igroup {} for host {}.'.format(shard_member['initiator'],
+                                                                                                        shard_member[
+                                                                                                            'igroup'].initiator_group_name,
+                                                                                                        shard_member['hostname']))
+                            exit(1)
+                        else:
+                            logging.info('Initiator {} has been added to {} for host {}.'.format(shard_member['initiator'],
+                                                                                                 shard_member[
+                                                                                                     'igroup'].initiator_group_name,
+                                                                                                 shard_member['hostname']))
                     for volclone in shard_member['volclone_topology']:
                         result = volclone.create(svm=svm_session)
-                        if result[0] == 'passed':
-                            logging.info('FlexClone {} has been created.'.format(volclone.volume))
-                        else:
-                            logging.error('Failed to create flexclone {}.'.format(volclone.volume))
+                        if result[0] == 'failed':
+                            logging.error('Failed to create flexclone {} for host {}.'.format(volclone.volume,
+                                                                                              shard_member['hostname']))
                             exit(1)
+                        else:
+                            logging.info('FlexClone {} has been created.'.format(volclone.volume))
 
                     for lun in shard_member['lun_mapping']:
                         result = lun.mapping(svm=svm_session)
-                        if result[0] == 'passed':
-                            logging.info('LUN {} has been mapped to igroup {}.'.format(lun.path, lun.igroup_name))
-                        else:
-                            logging.error('Failed to map LUN {} to igroup {}.'.format(lun.path, lun.igroup_name))
+                        if result[0] == 'failed':
+                            logging.error('Failed to map LUN {} to igroup {} for host {}.'.format(lun.path,
+                                                                                                  lun.igroup_name,
+                                                                                                  shard_member['hostname']))
                             exit(1)
-                            
-                    # -- openning ssh connection to execute host side commands
-                    host = HostConn(ipaddr=shard_member['hostname'], username=self.username)
-    
+                        else:
+                            logging.info('LUN {} has been mapped to igroup {} for host {}.'.format(lun.path,
+                                                                                                   lun.igroup_name,
+                                                                                                   shard_member['hostname']))
+
                     result = host.iscsi_send_targets(iscsi_target=shard_member['iscsi_target'])
                     if result[1] != 0:
-                        logging.error('{} on host {}.'.format(result[0], shard_member['hostname']))
+                        logging.error('{} on host {}'.format(result[0], shard_member['hostname']))
                         exit(1)
                     else:
-                        logging.info('Discovering targets for {} on host {}.'.format(shard_member['iscsi_target'],
-                                                                                     shard_member['hostname']))
-    
+                        logging.info(
+                            'Discovering targets on {} for host {}.'.format(shard_member['iscsi_target'], shard_member['hostname']))
+
                     result = host.iscsi_node_login()
                     if result[1] != 0:
                         logging.error('{} on host {}.'.format(result[0], shard_member['hostname']))
                         exit(1)
                     else:
-                        logging.info('Logged in to ISCSI targets and ready to rescan devices on host {}.'.format(shard_member['hostname']))
-    
-                    # -- rescanning disk devices
+                        logging.info('Logged in to {} targets and ready to rescan devices on host {}.'.format(
+                            shard_member['igroup'].initiator_group_type,
+                            shard_member['hostname']))
+
                     result = host.iscsi_rescan()
                     if result[1] != 0:
-                        logging.error('Could not rescan {} devices on host {}.'.format(shard_member['igroup'].initiator_group_type,
-                                                                                       shard_member['hostname']))
+                        logging.error(
+                            'Could not rescan {} devices on host {}.'.format(shard_member['igroup'].initiator_group_type,
+                                                                             shard_member['hostname']))
                         exit(1)
                     else:
-                        logging.info('{} devices have been scanned on host {}.'.format(shard_member['igroup'].initiator_group_type,
-                                                                                       shard_member['hostname']))
-                    # -- Activating volume group
+                        logging.info(
+                            '{} devices have been scanned on host {}.'.format(shard_member['igroup'].initiator_group_type,
+                                                                              shard_member['hostname']))
+
                     result = host.enable_vg(vg_name=shard_member['storage_info']['lvm_vgname'])
                     if result[1] != 0:
-                        logging.error('Could not enable volume group {} on host {}'.format(shard_member['storage_info']['lvm_vgname'],
-                                                                                           shard_member['hostname']))
+                        logging.error(
+                            'Could not enable volume group {} on host {}.'.format(shard_member['storage_info']['lvm_vgname'],
+                                                                                  shard_member['hostname']))
                         exit(1)
                     else:
-                        logging.info('Volume Group {} has been activated on host {}.'.format(shard_member['storage_info']['lvm_vgname'],
-                                                                                             shard_member['hostname']))
-    
-                    # -- Mounting file system
+                        logging.info(
+                            'Volume Group {} has been activated on host {}.'.format(shard_member['storage_info']['lvm_vgname'],
+                                                                                    shard_member['hostname']))
+
                     result = host.mount_fs(fs_mountpoint=shard_member['mountpoint'], fs_type=shard_member['storage_info']['fs_type'],
                                            device=shard_member['storage_info']['mdb_device'])
                     if result[1] != 0:
@@ -1089,60 +1307,123 @@ class SubCmdClone:
                                                                                      shard_member['hostname']))
                         exit(1)
                     else:
-                        logging.info('Device {} has been mounted to {} on host {}.'.format(shard_member['storage_info']['mdb_device'],
-                                                                                           shard_member['mountpoint'],
-                                                                                           shard_member['hostname']))
-                    # -- Start MongoDB
-                    if shard_member['dir_per_db']:
-                        recover_mode = '/usr/bin/mongod --logpath /var/log/mongodb/mongod_recover.log --dbpath ' + shard_member[
-                            'mountpoint'] + ' --port ' + shard_member['port'] + ' --replSet ' + shard['name'] + ' --directoryperdb --fork'
-                    else:
-                        recover_mode = '/usr/bin/mongod --logpath /var/log/mongodb/mongod_recover.log --dbpath ' + shard_member[
-                            'mountpoint'] + ' --port ' + shard_member['port'] + ' --replSet ' + shard['name'] + ' --fork'
+                        logging.info(
+                            'Device {} has been mounted to {} on host {}.'.format(shard_member['storage_info']['mdb_device'],
+                                                                                  shard_member['mountpoint'],
+                                                                                  shard_member['hostname']))
 
+                    # -- Starting MongoDB on recover mode
                     result = host.run_command('/sbin/runuser -l mongod -g mongod -c "' + recover_mode + '"')
                     if result[1] != 0:
-                        logging.error('Cannot start mongodb in recover mode.')
+                        logging.error('Cannot start mongodb in recover mode on host {}.'.format(shard_member['hostname']))
                         exit(1)
                     else:
                         logging.info('MongoDB has been started in recover mode on host {}.'.format(shard_member['hostname']))
 
                     # -- Updating ReplicaSet info
-                    mdb_recover_uri = 'mongodb://' + shard_member['hostname'] + ':' + shard_member['port']
-                    mdb_recover_session = MongoDBCluster(mongodb_uri=mdb_recover_uri)
+                    mdb_uri = 'mongodb://' + shard_member['hostname'] + ':' + shard_member['port']
+                    mdb_session = MongoDBCluster(mongodb_uri=mdb_uri)
+                    mdb_session.update_doc(dbname='local', collection='system.replset',
+                                           update_filter={'_id': shard['name']},
+                                           update_doc={'$unset': {'members': ''}}
+                                           )
+                    mdb_session.update_doc(dbname='local', collection='system.replset',
+                                           update_filter={'_id': shard['name']},
+                                           update_doc={'$set': {'members': []}}
+                                           )
+                    mdb_session.update_doc(dbname='local', collection='system.replset',
+                                           update_filter={'_id': shard['name']},
+                                           update_doc={'$set': shard['reconfig']}
+                                           )
 
-                    rsoldconf = mdb_recover_session.get_replset_config()
+                    mdb_session.delete_doc(dbname='admin', collection='system.version',
+                                           delete_filter={'_id': 'minOpTimeRecovery'})
 
-                    rs_newconf = rsoldconf['config']
-                    rs_newconf['members'] = shard['reconfig_members']
+                    mdb_session.delete_doc(dbname='admin', collection='system.version',
+                                           delete_filter={'_id': 'shardIdentity'})
 
-                    mdb_recover_session.update_replset_config(replset_reconfig=rs_newconf)
-                    sleep(10)
-
-                    mdb_recover_session.delete_doc(dbname='admin', collection='system.version',
-                                                   delete_filter={"_id": "minOpTimeRecovery"})
-
-                    mdb_recover_session.delete_doc(dbname='admin', collection='system.version',
-                                                   delete_filter={"_id": "shardIdentity"})
-
-                    sleep(10)
-
+                    # -- Stopping MongoDB recover mode
                     result = host.run_command('pkill mongod')
                     if result[1] != 0:
-                        logging.error('Could not kill mongod on host {}.'.format(shard_member['hostname']))
+                        logging.error('Cannot kill mongoDB on host {}'.format(shard_member['hostname']))
                         exit(1)
                     else:
                         logging.info('MongoDB has been stopped on host {}.'.format(shard_member['hostname']))
+                        host.remove_file(shard_member['mountpoint'] + '/mongod.lock')
+                        host.remove_file('/var/run/mongodb/mongod.pid')
 
-                    result = host.run_command('rm -rf ' + shard_member['mountpoint'] + '/mongod.lock')
-                    result = host.run_command('rm -rf /var/run/mongodb/mongod.pid')
                     sleep(5)
 
-                    result = host.start_service('mongod')
+                    # -- Starting MongoDB normal mode
+                    result = host.run_command('/sbin/runuser -l mongod -g mongod -c "' + normal_mode + '"')
                     if result[1] != 0:
-                        logging.error('Cannot start mongod on host {}.'.format(shard_member['hostname']))
+                        logging.error('Cannot start mongodb in normal mode on host {}.'.format(shard_member['hostname']))
                         exit(1)
                     else:
                         logging.info('MongoDB has been started in normal mode on host {}.'.format(shard_member['hostname']))
+                        host.close()
 
+            # -- Starting mongoses
+            count = 1
+            configdb = self.clone_spec['config_servers']['setname'] + '/'
+            for spec_cs_member in self.clone_spec['config_servers']['members']:
+                if count < len(self.clone_spec['config_servers']['members']):
+                    configdb += spec_cs_member['hostname'] + ':' + spec_cs_member['port'] + ','
+                elif count == len(self.clone_spec['config_servers']['members']):
+                    configdb += spec_cs_member['hostname'] + ':' + spec_cs_member['port']
+                count += 1
+
+            for mongos in self.clone_spec['mongos']:
+                host = HostConn(ipaddr=mongos, username=self.username)
+                result = host.run_command('/usr/bin/mongos --bind_ip ' + mongos + ' --configdb ' + configdb +
+                                          ' --fork --logpath /var/log/mongodb/mongos.log')
+                if result[1] != 0:
+                    logging.error('Could not start mongos on host {}.'.format(mongos))
+                    exit(1)
+                else:
+                    logging.info('mongos has been started on host {}.'.format(mongos))
                     host.close()
+
+            # -- Stage 3 :: Cataloging it
+            clone_metadata = dict()
+            clone_metadata['clone_name'] = self.clone_name
+            clone_metadata['backup_name'] = self.backup_name
+            clone_metadata['clone_uid'] = self.clone_uid
+            clone_metadata['created_at'] = datetime.now()
+            clone_metadata['mongos'] = self.clone_spec['mongos']
+            clone_metadata['config_server'] = list()
+            clone_metadata['shards'] = list()
+            for cs_member in cloned_cluster['config_servers']['members']:
+                member = dict()
+                member['hostname'] = cs_member['hostname']
+                member['igroup_name'] = cs_member['igroup'].initiator_group_name
+                member['svm_name'] = cs_member['svm-name']
+                member['volclone_topology'] = list()
+                for vol in cs_member['volclone_topology']:
+                    member['volclone_topology'].append(vol.volume)
+
+                clone_metadata['config_server'].append(member)
+
+            for shard in cloned_cluster['shards']:
+                sh = dict()
+                sh['name'] = shard['name']
+                sh['members'] = list()
+                for sh_member in shard['members']:
+                    member = dict()
+                    member['hostname'] = sh_member['hostname']
+                    member['igroup_name'] = sh_member['igroup'].initiator_group_name
+                    member['svm_name'] = sh_member['svm-name']
+                    member['volclone_topology'] = list()
+                    for vol in sh_member['volclone_topology']:
+                        member['volclone_topology'].append(vol.volume)
+
+                    sh['members'].append(member)
+                clone_metadata['shards'].append(sh)
+
+            kdb_clones = kdb_session['clones']
+            result = kdb_clones.insert_one(clone_metadata).inserted_id
+            if result is None:
+                logging.error('Clone has been created but it was not inserted into the catalog.')
+                exit(1)
+            else:
+                logging.info('Clone has been created successfully.')
