@@ -288,12 +288,22 @@ def main():
     # -- If subcommand is clone
     if cliargs['which'] == 'clone':
         clone_args = dict()
-        clone_args['backup-name'] = cliargs['backup_name']
         clone_args['clone-name'] = cliargs['clone_name']
-        clone_args['cluster-name'] = cliargs['cluster_name']
         clone_args['username'] = kcfg['kairos']['username']
-        with open(cliargs['clone_spec'], 'r') as cs:
-            clone_args['clone-spec'] = json.load(cs)
+        if cliargs['backup_name'] is not None:
+            clone_args['backup-name'] = cliargs['backup_name']
+        else:
+            clone_args['backup-name'] = None
+        if cliargs['cluster_name'] is not None:
+            clone_args['cluster-name'] = cliargs['cluster_name']
+        else:
+            clone_args['cluster-name'] = None
+
+        if cliargs['clone_spec'] is not None:
+            with open(cliargs['clone_spec'], 'r') as cs:
+                clone_args['clone-spec'] = json.load(cs)
+        else:
+            clone_args['clone-spec'] = None
 
         clone = SubCmdClone(clone_args)
 
@@ -303,6 +313,14 @@ def main():
                 sys.exit(1)
             else:
                 clone.create_storage_clone(kairos_repo)
+                sys.exit(0)
+
+        if cliargs['delete']:
+            if cliargs['clone_name'] is None:
+                logging.error('You must enter a clone-name to delete a clone')
+                sys.exit(1)
+            else:
+                clone.delete(kairos_repo)
                 sys.exit(0)
 
     # -- If subcommand is oplogtailer

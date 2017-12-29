@@ -157,8 +157,10 @@ class LogicalInterface:
 class InitiatorGroup:
     def __init__(self, ig_spec=None):
         self.initiator_group_name = ig_spec['igroup-name']
-        self.initiator_group_type = ig_spec['igroup-type']
-        self.os_type = ig_spec['os-type']
+        if 'igroup-type' in ig_spec:
+            self.initiator_group_type = ig_spec['igroup-type']
+        if 'os-type' in ig_spec:
+            self.os_type = ig_spec['os-type']
 
     def create(self, svm=None):
         api_call = NaElement('igroup-create')
@@ -189,8 +191,12 @@ class InitiatorGroup:
             output = svm.run_command(api_call)
             return output.results_status(), output.sprintf()
 
-    def destroy(self, cluster):
-        pass
+    def destroy(self, svm=None):
+        api_call = NaElement('igroup-destroy')
+        api_call.child_add_string('initiator-group-name', self.initiator_group_name)
+
+        output = svm.run_command(api_call)
+        return output.results_status(), output.sprintf()
 
 
 class Volume:

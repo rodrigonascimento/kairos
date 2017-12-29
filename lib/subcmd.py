@@ -6,7 +6,7 @@ from pymongo import MongoClient, errors
 from sys import exit
 from time import sleep, time
 from datetime import datetime, timedelta
-from ontap import ClusterSession, Snapshot, FlexClone, InitiatorGroup, Lun
+from ontap import ClusterSession, Snapshot, FlexClone, InitiatorGroup, Lun, Volume
 from mongodbcluster import MongoDBCluster
 from host_conn import HostConn
 
@@ -668,10 +668,12 @@ class SubCmdRecovery:
 
 class SubCmdClone:
     def __init__(self, clone_args=None):
-        self.backup_name = clone_args['backup-name']
+        if clone_args['backup-name'] is not None:
+            self.backup_name = clone_args['backup-name']
+        if clone_args['cluster-name'] is not None:
+            self.cluster_name = clone_args['cluster-name']
         self.clone_name = clone_args['clone-name']
         self.clone_spec = clone_args['clone-spec']
-        self.cluster_name = clone_args['cluster-name']
         self.username = clone_args['username']
         self.clone_uid = time()
 
@@ -1388,16 +1390,24 @@ class SubCmdClone:
             clone_metadata = dict()
             clone_metadata['clone_name'] = self.clone_name
             clone_metadata['backup_name'] = self.backup_name
-            clone_metadata['clone_uid'] = self.clone_uid
+            clone_metadata['clone_uid'] = int(self.clone_uid)
             clone_metadata['created_at'] = datetime.now()
             clone_metadata['mongos'] = self.clone_spec['mongos']
             clone_metadata['config_server'] = list()
             clone_metadata['shards'] = list()
             for cs_member in cloned_cluster['config_servers']['members']:
                 member = dict()
+                if cs_member['arbiter_only']:
+                    member['hostname'] = cs_member['hostname']
+                    member['arbiter_only'] = cs_member['arbiter_only']
+                    continue
+                    
                 member['hostname'] = cs_member['hostname']
+                member['arbiter_only'] = cs_member['arbiter_only']
                 member['igroup_name'] = cs_member['igroup'].initiator_group_name
                 member['svm_name'] = cs_member['svm-name']
+                member['mountpoint'] = cs_member['mountpoint']
+                member['lvm_vgname'] = cs_member['storage_info']['lvm_vgname']
                 member['volclone_topology'] = list()
                 for vol in cs_member['volclone_topology']:
                     member['volclone_topology'].append(vol.volume)
@@ -1410,9 +1420,17 @@ class SubCmdClone:
                 sh['members'] = list()
                 for sh_member in shard['members']:
                     member = dict()
+                    if sh_member['arbiter_only']:
+                        member['hostname'] = sh_member['hostname']
+                        member['arbiter_only'] = sh_member['arbiter_only']
+                        continue
+                        
                     member['hostname'] = sh_member['hostname']
+                    member['arbiter_only'] = sh_member['arbiter_only']
                     member['igroup_name'] = sh_member['igroup'].initiator_group_name
                     member['svm_name'] = sh_member['svm-name']
+                    member['mountpoint'] = sh_member['mountpoint']
+                    member['lvm_vgname'] = sh_member['storage_info']['lvm_vgname']
                     member['volclone_topology'] = list()
                     for vol in sh_member['volclone_topology']:
                         member['volclone_topology'].append(vol.volume)
@@ -1427,3 +1445,185 @@ class SubCmdClone:
                 exit(1)
             else:
                 logging.info('Clone has been created successfully.')
+
+    def delete(self, kdb_session=None):
+        kdb_clones = kdb_session['clones']
+        clone2del = kdb_clones.find_one({'clone_name': self.clone_name})
+
+        if clone2del is None:
+            logging.error('Cannot find clone {}.'.format(self.clone_name))
+            exit(1)
+
+        for mongos in clone2del['mongos']:
+            host = HostConn(ipaddr=mongos, username=self.username)
+            result = host.run_command('pkill mongos')
+            if result[1] != 0:
+                logging.error('Could not kill mongos on host {}.'.format(mongos))
+                exit(1)
+            else:
+                logging.info('mongos has been stopped on host {}.'.format(mongos))
+                host.close()
+
+        for cs_member in clone2del['config_server']:
+            host = HostConn(ipaddr=cs_member['hostname'], username=self.username)
+            
+            if cs_member['arbiter_only']:
+                result = host.run_command('pkill mongod')
+                if result[1] != 0:
+                    logging.error('Could not kill mongod on host {}'.format(cs_member['hostname']))
+                    exit(1)
+                else:
+                    logging.info('mongod has been stopped on host {}.'.format(cs_member['hostname']))
+                    continue
+
+            result = host.run_command('pkill mongod')
+            if result[1] != 0:
+                logging.error('Could not kill mongod on host {}'.format(cs_member['hostname']))
+                exit(1)
+            else:
+                logging.info('mongod has been stopped on host {}.'.format(cs_member['hostname']))
+                sleep(3)
+
+            result = host.umount_fs(fs_mountpoint=cs_member['mountpoint'])
+            if result[1] != 0:
+                logging.error('Could not unmount mongoDB file system {} on host {}.'.format(cs_member['mountpoint'],
+                                                                                           cs_member['hostname']))
+                exit(1)
+            else:
+                logging.info('mongoDB file system {} has been unmounted on host {}.'.format(cs_member['mountpoint'],
+                                                                                            cs_member['hostname']))
+                sleep(3)
+
+            result = host.disable_vg(vg_name=cs_member['lvm_vgname'])
+            if result[1] != 0:
+                logging.error('Could not disable volume group {} on host {}.'.format(cs_member['lvm_vgname'],
+                                                                                     cs_member['hostname']))
+                exit(1)
+            else:
+                logging.info('Volume Group {} has been disabled on host {}.'.format(cs_member['lvm_vgname'],
+                                                                                    cs_member['hostname']))
+
+            # -- establishing NetApp cluster session to delete flexclones
+            # -- Putting volumes offline, then delete them.
+            # -- Destroying igroups
+            kdb_ntapsys = kdb_session['ntapsystems']
+            ntapsys = kdb_ntapsys.find_one({'svm-name': cs_member['svm_name']})
+            svm_session = ClusterSession(cluster_ip=ntapsys['netapp-ip'], user=ntapsys['username'],
+                                         password=ntapsys['password'], vserver=ntapsys['svm-name'])
+
+            for vol in cs_member['volclone_topology']:
+                vol_spec = dict()
+                vol_spec['volume'] =  vol
+                volclone = Volume(vol_spec)
+                result = volclone.destroy(svm=svm_session)
+                if result[0] == 'failed':
+                    logging.error('Could not delete flexvolume {} on SVM {}.'.format(vol, cs_member['svm_name']))
+                    exit(1)
+                else:
+                    logging.info('FlexClone volume {} has been deleted on SVM {}.'.format(vol, cs_member['svm_name']))
+
+            igroup_spec = dict()
+            igroup_spec['igroup-name'] = cs_member['igroup_name']
+            igroup = InitiatorGroup(igroup_spec)
+
+            result = igroup.destroy(svm=svm_session)
+            if result[0] == 'failed':
+                logging.error('Could not destroy igroup {} on SVM {}.'.format(cs_member['igroup_name'],
+                                                                              cs_member['svm_name']))
+                exit(1)
+            else:
+                logging.info('Igroup {} has been destroyed on SVM {}.'.format(cs_member['igroup_name'],
+                                                                              cs_member['svm_name']))
+
+            result = host.iscsi_rescan()
+            if result[1] != 0:
+                logging.error('Could not rescan devices on host {}.'.format(cs_member['hostname']))
+                exit(1)
+            else:
+                logging.info('Stale devices has been removed on host {}.'.format(cs_member['hostname']))
+                host.close()
+
+        for shard in clone2del['shards']:
+            for sh_member in shard['members']:
+                host = HostConn(ipaddr=sh_member['hostname'], username=self.username)
+
+                if sh_member['arbiter_only']:
+                    result = host.run_command('pkill mongod')
+                    if result[1] != 0:
+                        logging.error('Could not kill mongod on host {}'.format(sh_member['hostname']))
+                        exit(1)
+                    else:
+                        logging.info('mongod has been stopped on host {}.'.format(sh_member['hostname']))
+                        continue
+
+                result = host.run_command('pkill mongod')
+                if result[1] != 0:
+                    logging.error('Could not kill mongod on host {}'.format(sh_member['hostname']))
+                    exit(1)
+                else:
+                    logging.info('mongod has been stopped on host {}.'.format(sh_member['hostname']))
+                    sleep(3)
+
+                result = host.umount_fs(fs_mountpoint=sh_member['mountpoint'])
+                if result[1] != 0:
+                    logging.error('Could not unmount mongoDB file system {} on host {}.'.format(sh_member['mountpoint'],
+                                                                                                sh_member['hostname']))
+                    exit(1)
+                else:
+                    logging.info('mongoDB file system {} has been unmounted on host {}.'.format(sh_member['mountpoint'],
+                                                                                                sh_member['hostname']))
+                    sleep(3)
+
+                result = host.disable_vg(vg_name=sh_member['lvm_vgname'])
+                if result[1] != 0:
+                    logging.error('Could not disable volume group {} on host {}.'.format(sh_member['lvm_vgname'],
+                                                                                         sh_member['hostname']))
+                    exit(1)
+                else:
+                    logging.info('Volume Group {} has been disabled on host {}.'.format(sh_member['lvm_vgname'],
+                                                                                        sh_member['hostname']))
+
+                # -- establishing NetApp cluster session to delete flexclones
+                # -- Putting volumes offline, then delete them.
+                # -- Destroying igroups
+                kdb_ntapsys = kdb_session['ntapsystems']
+                ntapsys = kdb_ntapsys.find_one({'svm-name': sh_member['svm_name']})
+                svm_session = ClusterSession(cluster_ip=ntapsys['netapp-ip'], user=ntapsys['username'],
+                                             password=ntapsys['password'], vserver=ntapsys['svm-name'])
+
+                for vol in sh_member['volclone_topology']:
+                    vol_spec = dict()
+                    vol_spec['volume'] = vol
+                    volclone = Volume(vol_spec)
+                    result = volclone.destroy(svm=svm_session)
+                    if result[0] == 'failed':
+                        logging.error('Could not delete flexvolume {} on SVM {}.'.format(vol, sh_member['svm_name']))
+                        exit(1)
+                    else:
+                        logging.info(
+                            'FlexClone volume {} has been deleted on SVM {}.'.format(vol, sh_member['svm_name']))
+
+                igroup_spec = dict()
+                igroup_spec['igroup-name'] = sh_member['igroup_name']
+                igroup = InitiatorGroup(igroup_spec)
+
+                result = igroup.destroy(svm=svm_session)
+                if result[0] == 'failed':
+                    logging.error('Could not destroy igroup {} on SVM {}.'.format(sh_member['igroup_name'],
+                                                                                  sh_member['svm_name']))
+                    exit(1)
+                else:
+                    logging.info('Igroup {} has been destroyed on SVM {}.'.format(sh_member['igroup_name'],
+                                                                                  sh_member['svm_name']))
+
+                result = host.iscsi_rescan()
+                if result[1] != 0:
+                    logging.error('Could not rescan devices on host {}.'.format(sh_member['hostname']))
+                    exit(1)
+                else:
+                    logging.info('Stale devices has been removed on host {}.'.format(sh_member['hostname']))
+                    host.close()
+
+        result = kdb_clones.delete_one({'clone_name': self.clone_name})
+        if result is not None:
+            logging.info('Clone {} has been deleted.'.format(self.clone_name))
