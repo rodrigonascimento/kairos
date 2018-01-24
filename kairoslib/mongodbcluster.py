@@ -52,11 +52,10 @@ class MongoDBCluster:
         configdb = self.conn['config']
         settings = configdb['settings']
         try:
-            settings.update_one({'_id': 'balancer'}, { '$set': { 'stopped': False}}, upsert=True)
+            settings.update_one({'_id': 'balancer'}, { '$set': { 'stopped': False}}, upsert=True).modified_count
         except Exception as e:
             logging.error(e.message)
             exit(1)
-
 
     def get_topology(self):
         databases = self.conn.admin.command("listDatabases")['databases']
@@ -78,8 +77,9 @@ class MongoDBCluster:
                 doc['stateStr'] = member['stateStr']
                 cluster_topology['members'].append(doc)
                 if member['stateStr'] == 'PRIMARY':
-                    cluster_topology['databases'] = self.get_databases()
-                    cluster_topology['collections'] = self.get_collections()
+                    cluster_topology['databases'] = self.get_dbs_collections()
+                    #cluster_topology['databases'] = self.get_databases()
+                    #cluster_topology['collections'] = self.get_collections()
 
             return cluster_topology
         elif cluster_type == 'sharded':
@@ -103,8 +103,7 @@ class MongoDBCluster:
                 doc = dict()
                 doc['shard_name'] = shard['_id']
                 doc['shard_members'] = shard_replSet.get_topology()['members']
-                doc['databases'] = shard_replSet.get_databases()
-                doc['collections'] = shard_replSet.get_collections()
+                doc['databases'] = shard_replSet.get_dbs_collections()
                 cluster_topology['shards'].append(doc)
             return cluster_topology
 
@@ -130,6 +129,19 @@ class MongoDBCluster:
                     coll_list.append(collection)
         return coll_list
 
+    def get_dbs_collections(self):
+        dbs = self.conn.admin.command('listDatabases')['databases']
+        coll_in_db = dict()
+        for db in dbs:
+            if (db['name'] == 'config') or (db['name'] == 'admin') or (db['name'] == 'local'):
+                continue
+            else:
+                coll_in_db[db['name']] = list()
+                coll_cursor = database.Database(client=self.conn, name=db['name'])
+                for collection in coll_cursor.collection_names():
+                    coll_in_db[db['name']].append(collection)
+        return coll_in_db
+
     def get_replset_config(self):
         result = self._run_command('replSetGetConfig')
         return result
@@ -141,11 +153,20 @@ class MongoDBCluster:
     def delete_doc(self, dbname=None, collection=None, delete_filter=None):
         db = self.conn[dbname]
         coll = db[collection]
-        result = coll.delete_one(filter=delete_filter).deleted_count
-        return result
+        try:
+            result = coll.delete_one(filter=delete_filter).deleted_count
+            return result
+        except:
+            print 'Failed to delete the document on collection {}.'.format(collection)
+            exit(1)
 
     def update_doc(self, dbname=None, collection=None, update_filter=None, update_doc=None):
         db = self.conn[dbname]
         coll = db[collection]
-        result = coll.update_one(filter=update_filter, update=update_doc).modified_count
-        return result
+        try:
+            result = coll.update_one(filter=update_filter, update=update_doc).modified_count
+            return result
+        except:
+            print 'Failed to update document on collection {}.'.format(collection)
+            exit(1)
+

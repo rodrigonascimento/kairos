@@ -20,8 +20,10 @@ import pymongo
 import logging
 from time import time, sleep, strftime
 
-sys.path.append(os.path.join(os.path.dirname(__file__)) + '/lib')
-from subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup, SubCmdRecovery, SubCmdClone
+#sys.path.append(os.path.join(os.path.dirname(__file__)) + '/kairoslib')
+#from subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup, SubCmdRecovery, SubCmdClone
+
+from kairoslib.subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup, SubCmdRecovery, SubCmdClone
 
 def cmdargs():
     cmdopts = argparse.ArgumentParser(description='NetApp Data Protection for MongoDB')
@@ -79,6 +81,7 @@ def cmdargs():
     clone.add_argument('--clone-name', type=str, help='Clone name')
     clone.add_argument('--backup-name', type=str, help='Backup name to be used as the baseline for your clone')
     clone.add_argument('--clone-spec', type=str, help='Clone specification file')
+    clone.add_argument('--desc', type=str, help='Description about your clone')
     clone.set_defaults(which='clone')
 
     oplogtailer = subcmd.add_parser('oplogtailer')
@@ -244,20 +247,19 @@ def main():
                 backup.list_all(kairos_repo)
                 sys.exit(0)
 
-        if cliargs['search_for_db']:
+        if cliargs['search_for_db'] and not cliargs['search_for_collection']:
             if backup_spec['cluster-name'] is None:
                 logging.error('You must enter a cluster-name to list all the backups of a given MongoDB cluster.')
                 sys.exit(1)
             else:
                 backup.search_for_db(kairos_repo, cliargs['search_for_db'])
                 sys.exit(0)
-
-        if cliargs['search_for_collection']:
+        elif cliargs['search_for_db'] and cliargs['search_for_collection']:
             if backup_spec['cluster-name'] is None:
                 logging.error('You must enter a cluster-name to list all the backups of a given MongoDB cluster.')
                 sys.exit(1)
             else:
-                backup.search_for_collection(kairos_repo, cliargs['search_for_collection'])
+                backup.search_for_collection(kairos_repo, cliargs['search_for_db'], cliargs['search_for_collection'])
                 sys.exit(0)
 
         if cliargs['delete']:
@@ -290,6 +292,11 @@ def main():
         clone_args = dict()
         clone_args['clone-name'] = cliargs['clone_name']
         clone_args['username'] = kcfg['kairos']['username']
+        if cliargs['desc'] is not None:
+            clone_args['desc'] = cliargs['desc']
+        else:
+            clone_args['desc'] = None
+
         if cliargs['backup_name'] is not None:
             clone_args['backup-name'] = cliargs['backup_name']
         else:
@@ -323,6 +330,14 @@ def main():
                 clone.delete(kairos_repo)
                 sys.exit(0)
 
+        if cliargs['list']:
+            if cliargs['cluster_name'] is None:
+                logging.error('You must enter a clone-name and cluster-name to list your clones.')
+                sys.exit(1)
+            else:
+                clone.list(kairos_repo)
+                sys.exit(0)
+
     # -- If subcommand is oplogtailer
     if cliargs['which'] == 'oplogtailer':
         pass
@@ -330,3 +345,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    

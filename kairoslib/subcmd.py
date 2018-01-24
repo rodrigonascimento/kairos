@@ -327,7 +327,8 @@ class SubCmdBackup:
 
     def search_for_db(self, kdb_session, keyword):
         kdb_bkps = kdb_session['backups']
-        result = kdb_bkps.find({'mongo_topology.shards.databases': keyword})
+        key_search = 'mongo_topology.shards.databases.' + keyword
+        result = kdb_bkps.find({ key_search: { '$exists': True} })
         print '{:30} \t {:30} {:30}'.format('Backup Name', 'Created At', 'Retention')
         for bkp in result:
             print '{:30} \t {:30} {:30}'.format(bkp['backup_name'],
@@ -335,9 +336,10 @@ class SubCmdBackup:
                                                 bkp['retention'].strftime('%c %Z')
                                                 )
 
-    def search_for_collection(self, kdb_session, keyword):
+    def search_for_collection(self, kdb_session, database, collection):
         kdb_bkps = kdb_session['backups']
-        result = kdb_bkps.find({'mongo_topology.shards.collections': keyword})
+        key_search = 'mongo_topology.shards.databases.' + database
+        result = kdb_bkps.find({ key_search: collection })
         print '{:30} \t {:30} {:30}'.format('Backup Name', 'Created At', 'Retention')
         for bkp in result:
             print '{:30} \t {:30} {:30}'.format(bkp['backup_name'],
@@ -356,6 +358,7 @@ class SubCmdBackup:
             return created_at + timedelta(days=int(value))
         elif unit == 'w':
             return created_at + timedelta(weeks=int(value))
+
 
 class SubCmdRecovery:
     def __init__(self, rst_spec=None):
@@ -666,12 +669,17 @@ class SubCmdRecovery:
         delete_newers = kdb_backup.delete_many({'created_at': { '$gt': bkp2restore['created_at']}})
         logging.info('{} backups has been removed from the backup catalog.'.format(delete_newers.deleted_count))
 
+
 class SubCmdClone:
     def __init__(self, clone_args=None):
         if clone_args['backup-name'] is not None:
             self.backup_name = clone_args['backup-name']
         if clone_args['cluster-name'] is not None:
             self.cluster_name = clone_args['cluster-name']
+        if clone_args['desc'] is not None:
+            self.desc = clone_args['desc']
+        else:
+            self.desc = ''
         self.clone_name = clone_args['clone-name']
         self.clone_spec = clone_args['clone-spec']
         self.username = clone_args['username']
@@ -1390,8 +1398,10 @@ class SubCmdClone:
             clone_metadata = dict()
             clone_metadata['clone_name'] = self.clone_name
             clone_metadata['backup_name'] = self.backup_name
+            clone_metadata['cluster_name'] = self.cluster_name
             clone_metadata['clone_uid'] = int(self.clone_uid)
             clone_metadata['created_at'] = datetime.now()
+            clone_metadata['desc'] = self.desc
             clone_metadata['mongos'] = self.clone_spec['mongos']
             clone_metadata['config_server'] = list()
             clone_metadata['shards'] = list()
@@ -1627,3 +1637,11 @@ class SubCmdClone:
         result = kdb_clones.delete_one({'clone_name': self.clone_name})
         if result is not None:
             logging.info('Clone {} has been deleted.'.format(self.clone_name))
+
+    def list(self, kdb_session=None):
+        kdb_clones = kdb_session['clones']
+        result = kdb_clones.find({'cluster_name': self.cluster_name})
+        print '{:30} \t {:30} \t {:30} \t {:40}'.format('Clone Name', 'Created at', 'Based on', 'Description')
+        for clone in result:
+            print '{:30} \t {:30} \t {:30} \t {:40}'.format(clone['clone_name'], clone['created_at'].strftime('%c %Z'),
+                                                            clone['backup_name'], clone['desc'])
