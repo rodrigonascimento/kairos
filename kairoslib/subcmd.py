@@ -34,8 +34,9 @@ class SubCmdMongodb:
 
     def remove(self, kdb_session, kdb_collection):
         collection = kdb_session[kdb_collection]
-        result = collection.delete_one({'cluster-name': self.mdb_spec['cluster-name']})
+        collection.delete_one({'cluster-name': self.mdb_spec['cluster-name']})
 
+    @staticmethod
     def list(self, kdb_session, kdb_collection):
         collection = kdb_session[kdb_collection]
         result = collection.find()

@@ -19,11 +19,8 @@ import json
 import pymongo
 import logging
 from time import time, sleep, strftime
-
-#sys.path.append(os.path.join(os.path.dirname(__file__)) + '/kairoslib')
-#from subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup, SubCmdRecovery, SubCmdClone
-
 from kairoslib.subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup, SubCmdRecovery, SubCmdClone
+from kairoslib.catalog import Catalog
 
 def cmdargs():
     cmdopts = argparse.ArgumentParser(description='NetApp Data Protection for MongoDB')
