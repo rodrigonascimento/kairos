@@ -27,6 +27,10 @@ def cmdargs():
     cmdopts.add_argument('--config', type=str, default='kairos.json', help='Kairos configuration file')
     subcmd = cmdopts.add_subparsers()
 
+    kairos_catalog = subcmd.add_parser('catalog')
+    kairos_catalog.add_argument('--create', action='store_true', help='Creates Kairos catalog database and Collections')
+    kairos_catalog.set_defaults(which='catalog')
+
     mdb_cluster = subcmd.add_parser('mongodb')
     mdb_cluster.add_argument('--add', action='store_true', help='Add a MongoDB Cluster for Data Protection')
     mdb_cluster.add_argument('--remove', action='store_true', help='Remove a MongoDB Cluster for Data Protection')
@@ -119,6 +123,14 @@ def main():
     except:
         logging.error('Connection to the database repository failed.')
         sys.exit(1)
+
+    catalog = Catalog(repo_uri=kcfg['kairos-repo']['repo-uri'], repo_name=kcfg['kairos-repo']['db-name'])
+    catalog.connect()
+
+    # -- If subcommand is catalog
+    if cliargs['which'] == 'catalog':
+        if cliargs['create']:
+            catalog.create()
 
     # -- If subcommand is mongodb
     if cliargs['which'] == 'mongodb':
