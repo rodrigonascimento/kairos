@@ -17,7 +17,6 @@ class Catalog:
     def connect(self):
         try:
             mongodb_uri = self.repo_uri + '/' + self.repo_name
-            logging.info('Connecting to Kairos Repository {}.'.format(mongodb_uri))
             self.session = MongoClient(mongodb_uri, connect=True)
             self.kairosdb = self.session[self.repo_name]
         except (errors.ConnectionFailure, errors.InvalidURI), e:
