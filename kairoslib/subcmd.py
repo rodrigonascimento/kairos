@@ -20,7 +20,7 @@ class SubCmdMongodb:
 
             self.mdb_spec = mdbcluster_spec
 
-    def add(self, kdb_session, kdb_collection):
+    def add(self, kdb_session=None, kdb_collection=None):
         if type(self._testing_conn()) is not bool:
             logging.error('Cannot connect to MongoDB Cluster.')
             exit(1)
@@ -32,12 +32,12 @@ class SubCmdMongodb:
                 logging.error(e.message)
                 exit(1)
 
-    def remove(self, kdb_session, kdb_collection):
+    def remove(self, kdb_session=None, kdb_collection=None):
         collection = kdb_session[kdb_collection]
         collection.delete_one({'cluster-name': self.mdb_spec['cluster-name']})
 
     @staticmethod
-    def list(self, kdb_session, kdb_collection):
+    def list(kdb_session=None, kdb_collection=None):
         collection = kdb_session[kdb_collection]
         result = collection.find()
         return result
@@ -135,7 +135,7 @@ class SubCmdBackup:
                     host = HostConn(ipaddr=rs_member['name'].split(':')[0], username=self.backup['username'])
                     rs_member['storage_info'] = host.get_storage_layout(cluster_info['mongodb-mongod-conf'])
                     host.close()
-                    logging('Collecting info about host {}'.format(rs_member['name'].split(':')[0]))
+                    logging.info('Collecting info about host {}'.format(rs_member['name'].split(':')[0]))
 
         elif topology['cluster_type'] == 'sharded':
             for cs_member in topology['config_servers']:

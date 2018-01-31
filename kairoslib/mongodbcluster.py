@@ -37,7 +37,6 @@ class MongoDBCluster:
 
         return status['inBalancerRound']
 
-
     def stop_balancer(self):
         configdb = self.conn['config']
         settings = configdb['settings']
@@ -61,14 +60,17 @@ class MongoDBCluster:
         databases = self.conn.admin.command("listDatabases")['databases']
         for db in databases:
             if db['name'] == 'config':
-                cluster_type = 'sharded'
-                break
+                dbconfig = self.conn['config']
+                shards_coll = dbconfig['shards']
+                if shards_coll.count() > 0:
+                    cluster_type = 'sharded'
+                    break
             else:
                 cluster_type = 'replSet'
 
         cluster_topology = dict()
         cluster_topology['cluster_type'] = cluster_type
-        if (cluster_type == 'replSet'):
+        if cluster_type == 'replSet':
             cluster_topology['members'] = list()
             for member in self.conn.admin.command("replSetGetStatus")['members']:
                 doc = dict()
