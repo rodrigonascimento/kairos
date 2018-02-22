@@ -3,7 +3,7 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from daemon import runner
 from time import sleep
 from kairoslib.catalog import Catalog
@@ -20,7 +20,7 @@ class Backup_Grim_Reaper:
         self.catalog = catalog_sess
 
     def check_expired_backups(self):
-        check_timenow = datetime.now()
+        check_timenow = datetime.now() - timedelta(seconds=self.check_interval)
         results = self.catalog.find_all(coll_name='backups', query={'retention': {'$lte': check_timenow}})
         return results
 

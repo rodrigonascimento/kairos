@@ -24,7 +24,7 @@ class Catalog:
             exit(1)
 
     def create(self):
-        kairos_collections = ['mdbclusters', 'ntapsystems', 'clones', 'backups']
+        kairos_collections = ['mdbclusters', 'ntapsystems', 'clones', 'backups', 'oplogarchiver']
         db_kairos = Database(client=self.session, name=self.repo_name)
         for kc in kairos_collections:
             try:
@@ -57,6 +57,12 @@ class Catalog:
                                              unique=True
                                              )
 
+        coll_indexes['oplogarchiver'] = IndexModel([('cluster_name', ASCENDING),
+                                              ('archiver_name', ASCENDING)],
+                                             name='idx_oplogarch_cluster_name_archiver_name',
+                                             unique=True
+                                             )
+
         for coll_idx in coll_indexes.keys():
             try:
                 logging.info('Creating index on repository collection {}.'.format(coll_idx))
@@ -69,13 +75,15 @@ class Catalog:
     def add(self, coll_name=None, doc=None):
         coll = self.kairosdb[coll_name]
         try:
-            result = coll.insert_one(doc).inserted_doc
+            result = coll.insert_one(doc).inserted_id
             return result
         except errors.DuplicateKeyError, e:
             logging.error(e)
+            return
 
     def edit(self, coll_name=None, query=None, update=None):
-        pass
+        coll = self.kairosdb[coll_name]
+        coll.find_one_and_update(filter=query, update=update)
 
     def remove_one(self, coll_name=None, query=None):
         coll = self.kairosdb[coll_name]

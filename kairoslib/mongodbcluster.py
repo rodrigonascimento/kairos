@@ -41,7 +41,7 @@ class MongoDBCluster:
         configdb = self.conn['config']
         settings = configdb['settings']
         try:
-            settings.update_one({'_id': 'balancer'}, { '$set': { 'stopped': True}}, upsert=True).modified_count
+            settings.update_one({'_id': 'balancer'}, {'$set': {'stopped': True}}, upsert=True).modified_count
             self.is_balancer_in_round()
         except Exception as e:
             logging.error(e.message)
@@ -51,7 +51,7 @@ class MongoDBCluster:
         configdb = self.conn['config']
         settings = configdb['settings']
         try:
-            settings.update_one({'_id': 'balancer'}, { '$set': { 'stopped': False}}, upsert=True).modified_count
+            settings.update_one({'_id': 'balancer'}, {'$set': {'stopped': False}}, upsert=True).modified_count
         except Exception as e:
             logging.error(e.message)
             exit(1)
@@ -80,8 +80,6 @@ class MongoDBCluster:
                 cluster_topology['members'].append(doc)
                 if member['stateStr'] == 'PRIMARY':
                     cluster_topology['databases'] = self.get_dbs_collections()
-                    #cluster_topology['databases'] = self.get_databases()
-                    #cluster_topology['collections'] = self.get_collections()
 
             return cluster_topology
         elif cluster_type == 'sharded':
@@ -172,3 +170,11 @@ class MongoDBCluster:
             print 'Failed to update document on collection {}.'.format(collection)
             exit(1)
 
+    def get_mongos_uri(self):
+        configdb = self.conn['config']
+        coll_mongos = configdb['mongos']
+        result = coll_mongos.find({}, {'_id': 1})
+        mongos_uri = 'mongodb://'
+        for mongos in result:
+            mongos_uri += mongos['_id'] + ','
+        return mongos_uri[:-1]

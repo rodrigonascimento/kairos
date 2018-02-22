@@ -3,8 +3,12 @@
     "username" : "root",
     "logfile"  : "kairosdp.log"
   },
-  "kairos-repo": {
+  "kairos-repo" : {
     "repo-uri" : "mongodb://10.61.105.13:27017",
     "db-name"  : "kairos_repo"
+  },
+  "kairos-oplog-archive" : {
+    "archiver-uri"    : "mongodb://10.61.105.13:27017",
+    "archiver-dbname" : "oplogArchiver"
   }
 }
