@@ -97,6 +97,9 @@ class Catalog:
         coll = self.kairosdb[coll_name]
         return coll.find(query)
 
-    def find_one(self, coll_name=None, query=None):
+    def find_one(self, coll_name=None, query=None, ordered=None):
         coll = self.kairosdb[coll_name]
-        return coll.find_one(query)
+        if ordered is not None:
+            return coll.find_one(query, sort=ordered)
+        else:
+            return coll.find_one(query)

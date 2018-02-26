@@ -26,17 +26,26 @@ class Producer(threading.Thread):
         self.archiver_repo_uri = archiver_repo_uri
         self.archiver_repo_dbname = archiver_repo_dbname
 
+        self.archiver_repo_sess = Catalog(repo_uri=self.archiver_repo_uri, repo_name=self.archiver_repo_dbname)
+        self.archiver_repo_sess.connect()
+
         try:
+            last_op = self.archiver_repo_sess.find_one(coll_name=self.cluster_name, query={'ns.db': self.database,
+                                                                                           'ns.coll': self.collection},
+                                                       ordered=[('_id', pymongo.DESCENDING)])
+
             self.mongo_sess = pymongo.MongoClient(self.mongodb_uri, connect=True)
             db = self.mongo_sess[self.database]
             self.watching_collec = db[self.collection]
-            self.collec_cursor = self.watching_collec.watch()
+
+            if last_op is None:
+                self.collec_cursor = self.watching_collec.watch()
+            else:
+                self.collec_cursor = self.watching_collec.watch(resume_after=last_op['_id'])
         except (pymongo.errors.ConnectionFailure or pymongo.errors.OperationFailure), e:
             LOGGER.error(e)
             exit(1)
 
-        self.archiver_repo_sess = Catalog(repo_uri=self.archiver_repo_uri, repo_name=self.archiver_repo_dbname)
-        self.archiver_repo_sess.connect()
 
     def run(self):
         while True:

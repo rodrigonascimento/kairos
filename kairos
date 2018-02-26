@@ -184,19 +184,25 @@ def main():
 
         if cliargs['list']:
             list_all = mongo.list(kairos_repo, 'mdbclusters')
-            for doc in list_all:
-                if doc['mongodb-auth'] == 'off':
-                    print '{} \t {} \t {} \t {}'.format(doc['cluster-name'], doc['mongodb-uri'],
-                                                            doc['mongodb-auth'],
-                                                            ' '.join([x for x in doc['netapp-systems']]))
-                elif doc['mongodb-auth'] == 'on':
-                    print '{} \t\t {} \t {} \t {} \t {} \t {} \t {}'.format(doc['cluster-name'],
-                                                                                    doc['mongodb-uri'],
-                                                                                    doc['mongodb-auth'],
-                                                                                    doc['mongodb-auth-db'],
-                                                                                    doc['mongodb-auth-user'],
-                                                                                    doc['mongodb-auth-pass'],
-                                                                                    ' '.join([x for x in doc['netapp-systems']]))
+            for mdb in list_all:
+                if mdb['mongodb-auth'] == 'on':
+                    print 'Cluster Name        : {}'.format(mdb['cluster-name'])
+                    print 'Connection String   : {}'.format(mdb['mongodb-uri'])
+                    print 'Sharded             : {}'.format(mdb['sharded'])
+                    print 'MongoDB Auth Status : {}'.format(mdb['mongodb-auth'])
+                    print 'Authentication DB   : {}'.format(mdb['mongodb-auth-db'])
+                    print 'Username            : {}'.format(mdb['mongodb-auth-user'])
+                    print 'Password            : {}'.format(''.join(['*' for letter in mdb['mongodb-auth-pass']]))
+                    print 'Storage Systems     : {}'.format(' '.join(ntap for ntap in mdb['netapp-systems']))
+                    print ''
+                else:
+                    print 'Cluster Name        : {}'.format(mdb['cluster-name'])
+                    print 'MongoDB Auth Status : {}'.format(mdb['mongodb-auth'])
+                    print 'Sharded             : {}'.format(mdb['sharded'])
+                    print 'Connection String   : {}'.format(mdb['mongodb-uri'])
+                    print 'Storage Systems     : {}'.format(' '.join(ntap for ntap in mdb['netapp-systems']))
+                    print ''
+
             sys.exit(0)
 
     # -- If subcommand is netapp
@@ -233,12 +239,13 @@ def main():
 
         if cliargs['list']:
             list_all = netapp.list(kairos_repo, 'ntapsystems')
-            print 'NetApp System \t Username \t Password \t SVM'
-            for doc in list_all:
-                if 'svm-name' not in doc.keys():
-                    print '{} \t {} \t\t {} \t {}'.format(doc['netapp-ip'], doc['username'], doc['password'], '---')
-                else:
-                    print '{} \t {} \t\t {} \t {}'.format(doc['netapp-ip'], doc['username'], doc['password'], doc['svm-name'])
+            for ntap in list_all:
+                print 'Storage System IP : {}'.format(ntap['netapp-ip'])
+                print 'Username          : {}'.format(ntap['username'])
+                print 'Password          : {}'.format(''.join(['*' for letter in ntap['password']]))
+                print 'SVM name          : {}'.format(ntap['svm-name'])
+                print ''
+
             sys.exit(0)
 
     # -- If subcommand is backup
@@ -383,7 +390,15 @@ def main():
                                                                                              cliargs['cluster_name']))
 
         if cliargs['delete']:
-            pass
+            if (cliargs['archiver_name'] is None) or (cliargs['cluster_name'] is None):
+                logging.error('You must enter a MongoDB Cluster, and an archiver name to delete an oplog archiver.')
+                sys.exit(1)
+            else:
+                catalog.remove_one(coll_name='oplogArchivers', query={'cluster_name': cliargs['cluster_name'],
+                                                                      'archiver_name': cliargs['archiver_name']})
+                logging.info('Archiver {} on Cluster {} has been successfully deleted.'.format(cliargs['archiver_name'],
+                                                                                               cliargs['cluster_name']))
+                sys.exit(0)
 
         if cliargs['list']:
             if cliargs['cluster_name'] is None:
@@ -395,7 +410,7 @@ def main():
                     print 'Archiver Name    : {}'.format(archiver['archiver_name'])
                     print 'Database Name    : {}'.format(archiver['database_name'])
                     print 'Collections List : {}'.format(' '.join([collection for collection in archiver['collections']]))
-                    print 'Retention Period : {}'.format(archiver['retention'])
+                    print 'Retention Period : {} (per operation)'.format(archiver['retention'])
                     print ''
                 sys.exit(0)
 
@@ -443,17 +458,23 @@ def main():
                                                                                       cliargs['cluster_name']))
                     sys.exit(1)
                 else:
-                    with open(archiver['pidfile'], 'r') as pidfile:
-                        ppid = pidfile.readline()
+                    if 'pidfile' in archiver:
+                        with open(archiver['pidfile'], 'r') as pidfile:
+                            ppid = pidfile.readline()
 
-                    kairos_proc = Process(int(ppid))
-                    kairos_proc.terminate()
+                        kairos_proc = Process(int(ppid))
+                        kairos_proc.terminate()
 
-                    catalog.edit(coll_name='oplogArchivers', query={'cluster_name': archiver['cluster_name'],
-                                                                    'archiver_name': archiver['archiver_name']},
-                                 update={'$unset': {'pidfile': ''} })
-
-                    sys.exit(0)
+                        catalog.edit(coll_name='oplogArchivers', query={'cluster_name': archiver['cluster_name'],
+                                                                        'archiver_name': archiver['archiver_name']},
+                                     update={'$unset': {'pidfile': ''} })
+                        logging.info('Archiver {} for cluster {} has been stopped.'.format(archiver['archiver_name'],
+                                                                                           archiver['cluster_name']))
+                        sys.exit(0)
+                    else:
+                        logging.error('Archiver {} for cluster {} is not running.'.format(archiver['archiver_name'],
+                                                                                          archiver['cluster_name']))
+                        sys.exit(1)
 
 if __name__ == '__main__':
     main()
