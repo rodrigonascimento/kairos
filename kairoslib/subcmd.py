@@ -1666,11 +1666,10 @@ class SubCmdRecover:
         self.arch_repo_name = rec_spec['arch-repo-name']
         self.arch_repo_uri = rec_spec['arch-repo-uri']
         self.temp_coll = 'temp_' + self.cluster_name + '_' + str(int(time()))
-        self.num_consumers = mp.cpu_count()
-        # if (mp.cpu_count()/2)-1 == 0:
-        #     self.num_consumers = 1
-        # else:
-        #     self.num_consumers = (mp.cpu_count()/2)-1
+        if (mp.cpu_count()/2)-1 == 0:
+            self.num_consumers = 1
+        else:
+            self.num_consumers = (mp.cpu_count()/2)-1
 
     def start(self):
         # Initiate a queue and lock to be used by consumers and producers
