@@ -93,7 +93,7 @@ class Backup_Grim_Reaper:
 class AppBackupGrimReaper():
     def __init__(self):
         self.stdin_path, self.stdout_path, self.stderr_path = ('/dev/null', '/dev/tty', '/dev/tty')
-        self.pidfile_path = '/tmp/bkpgrimreaper.pid'
+        self.pidfile_path = '/tmp/.bkpgrimreaper.pid'
         self.pidfile_timeout = 5
         self.kcfg = load_config_file(config_file='kairos.json')
 

@@ -93,9 +93,12 @@ class Catalog:
         except errors.InvalidOperation:
             return -1
 
-    def find_all(self, coll_name=None, query=None):
+    def find_all(self, coll_name=None, query=None, ordered=None):
         coll = self.kairosdb[coll_name]
-        return coll.find(query)
+        if ordered is not None:
+            return coll.find(query, sort=ordered)
+        else:
+            return coll.find(query)
 
     def find_one(self, coll_name=None, query=None, ordered=None):
         coll = self.kairosdb[coll_name]
@@ -103,3 +106,14 @@ class Catalog:
             return coll.find_one(query, sort=ordered)
         else:
             return coll.find_one(query)
+
+    def run_aggregation(self, coll_name=None, aggr_pipeline=None):
+        coll = self.kairosdb[coll_name]
+        return list(coll.aggregate(aggr_pipeline))
+
+    def drop_collection(self, coll_name=None):
+        coll = self.kairosdb[coll_name]
+        coll.drop()
+
+    def close(self):
+        self.session.close()

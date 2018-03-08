@@ -117,16 +117,11 @@ class MongoDBCluster:
                 db_list.append(db['name'])
         return db_list
 
-    def get_collections(self):
-        dbs = self.conn.admin.command("listDatabases")['databases']
+    def get_collections(self, db_name=None):
         coll_list = list()
-        for db in dbs:
-            if (db['name'] == 'config') or (db['name'] == 'admin') or (db['name'] == 'local'):
-                continue
-            else:
-                collection_list = database.Database(client=self.conn, name=db['name'])
-                for collection in collection_list.collection_names():
-                    coll_list.append(collection)
+        collection_list = database.Database(client=self.conn, name=db_name)
+        for collection in collection_list.collection_names():
+            coll_list.append(collection)
         return coll_list
 
     def get_dbs_collections(self):

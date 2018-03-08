@@ -1,14 +1,19 @@
 #!/usr/bin/env python
 
 import logging
+import multiprocessing as mp
+import multiprocessing.queues
 import xml.dom.minidom
+
+from datetime import datetime, timedelta
+from host_conn import HostConn
+from mongodbcluster import MongoDBCluster
+from ontap import ClusterSession, Snapshot, FlexClone, InitiatorGroup, Lun, Volume
 from pymongo import MongoClient, errors
+from arch_temp_data import ArchTempData
+from recover_consumer import RecoverConsumer
 from sys import exit
 from time import sleep, time
-from datetime import datetime, timedelta
-from ontap import ClusterSession, Snapshot, FlexClone, InitiatorGroup, Lun, Volume
-from mongodbcluster import MongoDBCluster
-from host_conn import HostConn
 
 
 class SubCmdMongodb:
@@ -125,6 +130,10 @@ class SubCmdBackup:
         else:
             pass
 
+        # -- backup metadata data structure
+        bkp_metadata = dict()
+        bkp_metadata['created_at'] = datetime.now()
+
         # -- Getting MongoDB cluster topology
         topology = mdbcluster.get_topology()
         logging.info(self.backup['cluster-name'] + ' is a ' + topology['cluster_type'] + ' cluster.')
@@ -226,10 +235,8 @@ class SubCmdBackup:
             mdbcluster.start_balancer()
 
         # -- Saving backup metadata to the repository database
-        bkp_metadata = dict()
         bkp_metadata['backup_name'] = self.backup['backup-name']
         bkp_metadata['cluster_name'] = self.backup['cluster-name']
-        bkp_metadata['created_at'] = datetime.now()
         bkp_metadata['mongo_topology'] = topology
         bkp_metadata['retention'] = self._calc_retention(self.backup['retention'], bkp_metadata['created_at'])
 
@@ -321,7 +328,7 @@ class SubCmdBackup:
     def list_all(self, kdb_session):
         kdb_bkps = kdb_session['backups']
         result = kdb_bkps.find()
-        print '{:30} \t {:30} {:30}'.format('Backup Name', 'Created At', 'Retention')
+        print '{:30} \t {:30} {:30}'.format('Backup Name', 'Created At', 'Expires At')
         for bkp in result:
             print '{:30} \t {:30} {:30}'.format(bkp['backup_name'], bkp['created_at'].strftime('%c %Z'),
                                                 bkp['retention'].strftime('%c %Z'))
@@ -366,6 +373,8 @@ class SubCmdRecovery:
         self.backup_name = rst_spec['backup-name']
         self.cluster_name = rst_spec['cluster-name']
         self.username = rst_spec['username']
+        if 'recovery_point' in rst_spec:
+            self.recovery_point = rst_spec['recovery_point']
 
     def restore(self, kdb_session=None):
         kdb_backup = kdb_session['backups']
@@ -1470,7 +1479,7 @@ class SubCmdClone:
             result = host.run_command('pkill mongos')
             if result[1] != 0:
                 logging.error('Could not kill mongos on host {}.'.format(mongos))
-                exit(1)
+#                exit(1)
             else:
                 logging.info('mongos has been stopped on host {}.'.format(mongos))
                 host.close()
@@ -1482,7 +1491,7 @@ class SubCmdClone:
                 result = host.run_command('pkill mongod')
                 if result[1] != 0:
                     logging.error('Could not kill mongod on host {}'.format(cs_member['hostname']))
-                    exit(1)
+#                    exit(1)
                 else:
                     logging.info('mongod has been stopped on host {}.'.format(cs_member['hostname']))
                     continue
@@ -1490,7 +1499,7 @@ class SubCmdClone:
             result = host.run_command('pkill mongod')
             if result[1] != 0:
                 logging.error('Could not kill mongod on host {}'.format(cs_member['hostname']))
-                exit(1)
+#                exit(1)
             else:
                 logging.info('mongod has been stopped on host {}.'.format(cs_member['hostname']))
                 sleep(3)
@@ -1499,7 +1508,7 @@ class SubCmdClone:
             if result[1] != 0:
                 logging.error('Could not unmount mongoDB file system {} on host {}.'.format(cs_member['mountpoint'],
                                                                                            cs_member['hostname']))
-                exit(1)
+#                exit(1)
             else:
                 logging.info('mongoDB file system {} has been unmounted on host {}.'.format(cs_member['mountpoint'],
                                                                                             cs_member['hostname']))
@@ -1509,7 +1518,7 @@ class SubCmdClone:
             if result[1] != 0:
                 logging.error('Could not disable volume group {} on host {}.'.format(cs_member['lvm_vgname'],
                                                                                      cs_member['hostname']))
-                exit(1)
+#                exit(1)
             else:
                 logging.info('Volume Group {} has been disabled on host {}.'.format(cs_member['lvm_vgname'],
                                                                                     cs_member['hostname']))
@@ -1529,7 +1538,7 @@ class SubCmdClone:
                 result = volclone.destroy(svm=svm_session)
                 if result[0] == 'failed':
                     logging.error('Could not delete flexvolume {} on SVM {}.'.format(vol, cs_member['svm_name']))
-                    exit(1)
+#                    exit(1)
                 else:
                     logging.info('FlexClone volume {} has been deleted on SVM {}.'.format(vol, cs_member['svm_name']))
 
@@ -1541,7 +1550,7 @@ class SubCmdClone:
             if result[0] == 'failed':
                 logging.error('Could not destroy igroup {} on SVM {}.'.format(cs_member['igroup_name'],
                                                                               cs_member['svm_name']))
-                exit(1)
+#                exit(1)
             else:
                 logging.info('Igroup {} has been destroyed on SVM {}.'.format(cs_member['igroup_name'],
                                                                               cs_member['svm_name']))
@@ -1549,7 +1558,7 @@ class SubCmdClone:
             result = host.iscsi_rescan()
             if result[1] != 0:
                 logging.error('Could not rescan devices on host {}.'.format(cs_member['hostname']))
-                exit(1)
+#                exit(1)
             else:
                 logging.info('Stale devices has been removed on host {}.'.format(cs_member['hostname']))
                 host.close()
@@ -1562,7 +1571,7 @@ class SubCmdClone:
                     result = host.run_command('pkill mongod')
                     if result[1] != 0:
                         logging.error('Could not kill mongod on host {}'.format(sh_member['hostname']))
-                        exit(1)
+#                        exit(1)
                     else:
                         logging.info('mongod has been stopped on host {}.'.format(sh_member['hostname']))
                         continue
@@ -1570,7 +1579,7 @@ class SubCmdClone:
                 result = host.run_command('pkill mongod')
                 if result[1] != 0:
                     logging.error('Could not kill mongod on host {}'.format(sh_member['hostname']))
-                    exit(1)
+#                    exit(1)
                 else:
                     logging.info('mongod has been stopped on host {}.'.format(sh_member['hostname']))
                     sleep(3)
@@ -1579,7 +1588,7 @@ class SubCmdClone:
                 if result[1] != 0:
                     logging.error('Could not unmount mongoDB file system {} on host {}.'.format(sh_member['mountpoint'],
                                                                                                 sh_member['hostname']))
-                    exit(1)
+#                    exit(1)
                 else:
                     logging.info('mongoDB file system {} has been unmounted on host {}.'.format(sh_member['mountpoint'],
                                                                                                 sh_member['hostname']))
@@ -1589,7 +1598,7 @@ class SubCmdClone:
                 if result[1] != 0:
                     logging.error('Could not disable volume group {} on host {}.'.format(sh_member['lvm_vgname'],
                                                                                          sh_member['hostname']))
-                    exit(1)
+#                    exit(1)
                 else:
                     logging.info('Volume Group {} has been disabled on host {}.'.format(sh_member['lvm_vgname'],
                                                                                         sh_member['hostname']))
@@ -1609,7 +1618,7 @@ class SubCmdClone:
                     result = volclone.destroy(svm=svm_session)
                     if result[0] == 'failed':
                         logging.error('Could not delete flexvolume {} on SVM {}.'.format(vol, sh_member['svm_name']))
-                        exit(1)
+#                        exit(1)
                     else:
                         logging.info(
                             'FlexClone volume {} has been deleted on SVM {}.'.format(vol, sh_member['svm_name']))
@@ -1622,7 +1631,7 @@ class SubCmdClone:
                 if result[0] == 'failed':
                     logging.error('Could not destroy igroup {} on SVM {}.'.format(sh_member['igroup_name'],
                                                                                   sh_member['svm_name']))
-                    exit(1)
+#                    exit(1)
                 else:
                     logging.info('Igroup {} has been destroyed on SVM {}.'.format(sh_member['igroup_name'],
                                                                                   sh_member['svm_name']))
@@ -1630,7 +1639,7 @@ class SubCmdClone:
                 result = host.iscsi_rescan()
                 if result[1] != 0:
                     logging.error('Could not rescan devices on host {}.'.format(sh_member['hostname']))
-                    exit(1)
+#                    exit(1)
                 else:
                     logging.info('Stale devices has been removed on host {}.'.format(sh_member['hostname']))
                     host.close()
@@ -1646,3 +1655,61 @@ class SubCmdClone:
         for clone in result:
             print '{:30} \t {:30} \t {:30} \t {:40}'.format(clone['clone_name'], clone['created_at'].strftime('%c %Z'),
                                                             clone['backup_name'], clone['desc'])
+
+
+class SubCmdRecover:
+    def __init__(self, rec_spec=None):
+        self.cluster_name = rec_spec['from-cluster-name']
+        self.dest_mongodb_uri = rec_spec['dest-mongodb-uri']
+        self.begin_from = rec_spec['begin-from']
+        self.until = rec_spec['until']
+        self.arch_repo_name = rec_spec['arch-repo-name']
+        self.arch_repo_uri = rec_spec['arch-repo-uri']
+        self.temp_coll = 'temp_' + self.cluster_name + '_' + str(int(time()))
+        self.num_consumers = mp.cpu_count()
+        # if (mp.cpu_count()/2)-1 == 0:
+        #     self.num_consumers = 1
+        # else:
+        #     self.num_consumers = (mp.cpu_count()/2)-1
+
+    def start(self):
+        # Initiate a queue and lock to be used by consumers and producers
+        recover_queue = multiprocessing.queues.JoinableQueue()
+
+        # Recover Producer instance
+        atd = ArchTempData(arch_repo_uri=self.arch_repo_uri, arch_repo_name=self.arch_repo_name,
+                           source_cluster_name=self.cluster_name, begin_from=self.begin_from, upto=self.until,
+                           temp_coll=self.temp_coll, arch_queue=recover_queue)
+
+        # Create a temporary collection containing the data that will be added back to the databases
+        atd.create_temp_data()
+
+        # Create a process to read temp data and insert in the queue
+        atd_proc = mp.Process(target=atd.read_temp_data)
+        atd_proc.start()
+        atd_proc.join()
+
+        # prepare the list of consumer instances
+        consumers = list()
+        num_procs = 0
+        while num_procs < self.num_consumers:
+            consumers.append(RecoverConsumer(arch_queue=recover_queue, dest_cluster_uri=self.dest_mongodb_uri))
+            num_procs += 1
+
+        # prepare list of consumer process instances
+        consumer_procs = list()
+        for consumer in consumers:
+            consumer_procs.append(mp.Process(target=consumer.run))
+
+        # kicking off consumer processes
+        for consumer_proc in consumer_procs:
+            consumer_proc.start()
+
+        # Waiting processes to finish their work
+        for consumer_proc in consumer_procs:
+            consumer_proc.join()
+
+        # Destroy temp data collection
+        atd.destroy_temp_data()
+
+        logging.info('Recover process has been completed.')

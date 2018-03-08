@@ -14,14 +14,13 @@ LOGGER = logging.getLogger(__name__)
 
 
 class Producer(threading.Thread):
-    def __init__(self, cluster_name=None, mongodb_uri=None, database=None, collection=None, retention=None,
-                 archiver_repo_uri=None, archiver_repo_dbname=None):
+    def __init__(self, cluster_name=None, mongodb_uri=None, database=None, collection=None, archiver_repo_uri=None,
+                 archiver_repo_dbname=None):
         threading.Thread.__init__(self)
         self.cluster_name = cluster_name
         self.mongodb_uri = mongodb_uri
         self.database = database
         self.collection = collection
-        self.retention = retention
 
         self.archiver_repo_uri = archiver_repo_uri
         self.archiver_repo_dbname = archiver_repo_dbname
@@ -39,9 +38,10 @@ class Producer(threading.Thread):
             self.watching_collec = db[self.collection]
 
             if last_op is None:
-                self.collec_cursor = self.watching_collec.watch()
+                self.collec_cursor = self.watching_collec.watch(full_document='updateLookup')
             else:
-                self.collec_cursor = self.watching_collec.watch(resume_after=last_op['_id'])
+                self.collec_cursor = self.watching_collec.watch(resume_after=last_op['_id'],
+                                                                full_document='updateLookup')
         except (pymongo.errors.ConnectionFailure or pymongo.errors.OperationFailure), e:
             LOGGER.error(e)
             exit(1)
@@ -50,34 +50,21 @@ class Producer(threading.Thread):
     def run(self):
         while True:
             try:
-                for op in self.collec_cursor:
-                    op['op_expires_at'] = self._calc_retention(retention=self.retention, created_at=datetime.now())
-                    self.archiver_repo_sess.add(coll_name=self.cluster_name, doc=op)
+                op = next(self.collec_cursor)
+                op['created_at'] = datetime.now()
+                self.archiver_repo_sess.add(coll_name=self.cluster_name, doc=op)
             except pymongo.errors.PyMongoError, e:
                 LOGGER.error(e)
 
-    def _calc_retention(self, retention, created_at):
-        unit = retention[len(retention)-1:]
-        value = retention[:-1]
-        if unit == 'm':
-            return created_at + timedelta(minutes=int(value))
-        elif unit == 'h':
-            return created_at + timedelta(hours=int(value))
-        elif unit == 'd':
-            return created_at + timedelta(days=int(value))
-        elif unit == 'w':
-            return created_at + timedelta(weeks=int(value))
-
 
 class AppKairosAPTR:
-    def __init__(self, cluster_name=None, database_name=None, collections=None, mongodb_uri=None, retention=None,
-                 archiver_name=None, kairoscfg=None):
+    def __init__(self, cluster_name=None, database_name=None, collections=None, mongodb_uri=None, archiver_name=None,
+                 kairoscfg=None):
         self.cluster_name = cluster_name
         self.archiver_name = archiver_name
         self.mongodb_uri = mongodb_uri
         self.database_name = database_name
         self.collections = collections
-        self.retention = retention
         self.pidfilepath = '/tmp/kairosAPITR_' + self.cluster_name + '_' + self.archiver_name + '.pid'
         self.kcfg = kairoscfg
 
@@ -85,11 +72,12 @@ class AppKairosAPTR:
         self.context = daemon.DaemonContext(detach_process=True, pidfile=self.pidfile)
 
     def start(self):
+        logging.info('{} has been started for cluster {}'.format(self.archiver_name, self.cluster_name))
         with self.context:
             producers = list()
             for coll in self.collections:
                 producers.append(Producer(cluster_name=self.cluster_name, mongodb_uri=self.mongodb_uri,
-                                          database=self.database_name, collection=coll, retention=self.retention,
+                                          database=self.database_name, collection=coll,
                                           archiver_repo_uri=self.kcfg['kairos-oplog-archive']['archiver-uri'],
                                           archiver_repo_dbname=self.kcfg['kairos-oplog-archive']['archiver-dbname']))
 

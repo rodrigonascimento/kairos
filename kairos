@@ -18,9 +18,10 @@ import argparse
 import json
 import pymongo
 import logging
+from datetime import datetime
 from psutil import Process
 from time import time, sleep, strftime
-from kairoslib.subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup, SubCmdRecovery, SubCmdClone
+from kairoslib.subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup, SubCmdRecovery, SubCmdClone, SubCmdRecover
 from kairoslib.mongodbcluster import MongoDBCluster
 from kairoslib.catalog import Catalog
 from kairoslib.kairos_aptr import AppKairosAPTR
@@ -29,6 +30,7 @@ from kairoslib.kairos_aptr import AppKairosAPTR
 def cmdargs():
     cmdopts = argparse.ArgumentParser(description='NetApp Data Protection for MongoDB')
     cmdopts.add_argument('--config', type=str, default='kairos.json', help='Kairos configuration file')
+    cmdopts.add_argument('--log-level', choices=['info', 'error'], default='info', help='Kairos log level')
     subcmd = cmdopts.add_subparsers()
 
     kairos_catalog = subcmd.add_parser('catalog')
@@ -73,11 +75,17 @@ def cmdargs():
     backup.add_argument('--retention', type=str, help='Backup retention [ 15m(in), 1h(our), 1d(ay), 1w(eek) ]')
     backup.set_defaults(which='backup')
 
-    recovery = subcmd.add_parser('recovery')
-    recovery.add_argument('--backup-name', type=str, help='Backup name')
-    recovery.add_argument('--cluster-name', type=str, help='MongoDB Cluster name')
-    recovery.add_argument('--full-restore', action='store_true', help='Restore a MongoDB cluster')
-    recovery.set_defaults(which='recovery')
+    restore = subcmd.add_parser('restore')
+    restore.add_argument('--backup-name', type=str, help='Backup name')
+    restore.add_argument('--cluster-name', type=str, help='MongoDB Cluster name')
+    restore.set_defaults(which='restore')
+
+    recover = subcmd.add_parser('recover')
+    recover.add_argument('--from-cluster-name', type=str, help='Archived operations from a given MongoDB cluster.')
+    recover.add_argument('--dest-mongodb-uri', type=str, help='MongoDB Cluster where the archived operations will be applied to.')
+    recover.add_argument('--begin-from', type=str, help='')
+    recover.add_argument('--until', type=str, help='')
+    recover.set_defaults(which='recover')
 
     clone = subcmd.add_parser('clone')
     clone.add_argument('--create', action='store_true', help='Create a clone')
@@ -93,9 +101,10 @@ def cmdargs():
     oplog = subcmd.add_parser('oplog')
     oplog.add_argument('--create', action='store_true', help='Create an oplog archiver for a given cluster')
     oplog.add_argument('--delete', action='store_true', help='Delete an oplog archiver from a given cluster')
-    oplog.add_argument('--list', action='store_true', help='List all oplog archivers for a given mongodb cluster')
+    oplog.add_argument('--list-archivers', action='store_true', help='List all oplog archivers for a given mongodb cluster')
     oplog.add_argument('--start', action='store_true', help='Start an Oplog Archiver')
     oplog.add_argument('--stop', action='store_true', help='Stop an Oplog Archiver')
+    oplog.add_argument('--list-ops', action='store_true', help='List the first and last archived op per database')
     oplog.add_argument('--cluster-name', type=str, help='MongoDB Cluster name')
     oplog.add_argument('--archiver-name', type=str, help='Oplog Archiver name')
     oplog.add_argument('--retention', type=str, help='Backup retention [ 15m(in), 1h(our), 1d(ay), 1w(eek) ]')
@@ -120,12 +129,27 @@ def main():
     kcfg = load_config_file(cliargs['config'])
 
     # -- Preparing logger
-    logging.basicConfig(format='%(asctime)s :: %(levelname)s :: %(message)s',
-                        level=logging.INFO,
-                        handlers=[
-                            logging.FileHandler(filename='kairos_dp.log'),
-                            logging.StreamHandler()
-                        ])
+    if cliargs['log_level'] == 'info':
+        logging.basicConfig(format='%(asctime)s :: %(levelname)s :: %(message)s',
+                            level=logging.INFO,
+                            handlers=[
+                                logging.FileHandler(filename='kairos_dp.log'),
+                                logging.StreamHandler()
+                            ])
+    elif cliargs['log_level'] == 'error':
+        logging.basicConfig(format='%(asctime)s :: %(levelname)s :: %(message)s',
+                            level=logging.ERROR,
+                            handlers=[
+                                logging.FileHandler(filename='kairos_dp.log'),
+                                logging.StreamHandler()
+                            ])
+    else:
+        logging.basicConfig(format='%(asctime)s :: %(levelname)s :: %(message)s',
+                            level=logging.NOTSET,
+                            handlers=[
+                                logging.FileHandler(filename='kairos_dp.log'),
+                                logging.StreamHandler()
+                            ])
 
     # -- Opening a session with the repository database
     try:
@@ -175,7 +199,6 @@ def main():
 
         if cliargs['remove']:
             if mdb_spec['cluster-name'] is not None:
-                #TODO: Checking for dependency on backups and clones before to remove a MongoDB cluster.
                 mongo.remove(kairos_repo, 'mdbclusters')
                 sys.exit(0)
             else:
@@ -298,22 +321,50 @@ def main():
                 backup.delete(kairos_repo)
                 sys.exit(0)
 
-    # -- If subcommand is recovery
-    if cliargs['which'] == 'recovery':
+    # -- If subcommand is restore
+    if cliargs['which'] == 'restore':
         restore_spec = dict()
         restore_spec['backup-name'] = cliargs['backup_name']
         restore_spec['cluster-name'] = cliargs['cluster_name']
         restore_spec['username'] = kcfg['kairos']['username']
 
-        recovery = SubCmdRecovery(restore_spec)
+        pit_restore = SubCmdRecovery(restore_spec)
 
-        if cliargs['full_restore']:
-            if (restore_spec['cluster-name'] is None) or (restore_spec['backup-name'] is None):
-                logging.error('You must enter a cluster-name and a backup-name to be able to trigger a restore.')
-                sys.exit(1)
-            else:
-                recovery.restore(kairos_repo)
-                sys.exit(0)
+        if (restore_spec['cluster-name'] is None) or (restore_spec['backup-name'] is None):
+            logging.error('You must enter a cluster-name and a backup-name to be able to trigger a restore.')
+            sys.exit(1)
+        else:
+            pit_restore.restore(kairos_repo)
+            sys.exit(0)
+
+    # -- if subcommand is recover
+    if cliargs['which'] == 'recover':
+        recover_spec = dict()
+        recover_spec['from-cluster-name'] = cliargs['from_cluster_name']
+        recover_spec['dest-mongodb-uri'] = cliargs['dest_mongodb_uri']
+        recover_spec['until'] = cliargs['until']
+        recover_spec['arch-repo-uri'] = kcfg['kairos-oplog-archive']['archiver-uri']
+        recover_spec['arch-repo-name'] = kcfg['kairos-oplog-archive']['archiver-dbname']
+        # -- validating date format before to create the recover object
+        if len(cliargs['begin_from']) == 19:
+            recover_spec['begin-from'] = datetime.strptime(cliargs['begin_from'], '%Y-%m-%d %H:%M:%S')
+        elif len(cliargs['begin_from']) == 26:
+            recover_spec['begin-from'] = datetime.strptime(cliargs['begin_from'], '%Y-%m-%d %H:%M:%S.%f')
+        else:
+            logging.error('--begin-from Invalid date and time format.')
+            exit(1)
+        # -- validating date format before to create the recover object
+        if len(cliargs['until']) == 19:
+            recover_spec['until'] = datetime.strptime(cliargs['until'], '%Y-%m-%d %H:%M:%S')
+        elif len(cliargs['until']) == 26:
+            recover_spec['until'] = datetime.strptime(cliargs['until'], '%Y-%m-%d %H:%M:%S.%f')
+        else:
+            logging.error('--until Invalid date and time format.')
+            exit(1)
+
+        pit_recover = SubCmdRecover(recover_spec)
+
+        pit_recover.start()
 
     # -- If subcommand is clone
     if cliargs['which'] == 'clone':
@@ -368,8 +419,8 @@ def main():
 
     if cliargs['which'] == 'oplog':
         if cliargs['create']:
-            if (cliargs['archiver_name'] is None) or (cliargs['cluster_name'] is None) or \
-                    (cliargs['db_name'] is None) or (cliargs['collections_list'] is None) or (cliargs['retention'] is None):
+            if (cliargs['archiver_name'] is None) or (cliargs['cluster_name'] is None) or (cliargs['db_name'] is None) \
+                    or (cliargs['collections_list'] is None):
                 logging.error('Provide an archiver name, mongodb cluster name, a retention, database name and a list '
                               'of collections to create an oplog archiver.')
                 sys.exit(1)
@@ -384,7 +435,6 @@ def main():
                     oplogArchiver['archiver_name'] = cliargs['archiver_name']
                     oplogArchiver['database_name'] = cliargs['db_name']
                     oplogArchiver['collections'] = cliargs['collections_list']
-                    oplogArchiver['retention'] = cliargs['retention']
                     catalog.add(coll_name='oplogArchivers', doc=oplogArchiver)
                     logging.info('Oplog Archiver {} has been created for {} cluster.'.format(cliargs['archiver_name'],
                                                                                              cliargs['cluster_name']))
@@ -400,7 +450,7 @@ def main():
                                                                                                cliargs['cluster_name']))
                 sys.exit(0)
 
-        if cliargs['list']:
+        if cliargs['list_archivers']:
             if cliargs['cluster_name'] is None:
                 logging.error('You have to specify a cluster name to get a list of the archivers.')
                 sys.exit(1)
@@ -410,7 +460,6 @@ def main():
                     print 'Archiver Name    : {}'.format(archiver['archiver_name'])
                     print 'Database Name    : {}'.format(archiver['database_name'])
                     print 'Collections List : {}'.format(' '.join([collection for collection in archiver['collections']]))
-                    print 'Retention Period : {} (per operation)'.format(archiver['retention'])
                     print ''
                 sys.exit(0)
 
@@ -436,8 +485,7 @@ def main():
 
                     appKAPTR = AppKairosAPTR(cluster_name=archiver['cluster_name'], database_name=archiver['database_name'],
                                              collections=archiver['collections'], mongodb_uri=mongouri,
-                                             retention=archiver['retention'], archiver_name=archiver['archiver_name'],
-                                             kairoscfg=kcfg)
+                                             archiver_name=archiver['archiver_name'], kairoscfg=kcfg)
 
                     catalog.edit(coll_name='oplogArchivers', query={'cluster_name': archiver['cluster_name'],
                                                                     'archiver_name': archiver['archiver_name']},
@@ -475,6 +523,27 @@ def main():
                         logging.error('Archiver {} for cluster {} is not running.'.format(archiver['archiver_name'],
                                                                                           archiver['cluster_name']))
                         sys.exit(1)
+
+        if cliargs['list_ops']:
+            if cliargs['cluster_name'] is None:
+                logging.error('You must enter a MongoDB Cluster to list the archived operations per database.')
+                sys.exit(1)
+            else:
+                op_catalog_sess = Catalog(repo_uri=kcfg['kairos-oplog-archive']['archiver-uri'],
+                                          repo_name=kcfg['kairos-oplog-archive']['archiver-dbname'])
+                op_catalog_sess.connect()
+
+                # Aggregation query to list the first and last operation grouped by database
+                pipeline = [{'$sort': {'created_at': 1}},
+                            {'$group': {'_id': '$ns.db', 'firstOperation': {'$first': '$created_at'},
+                                        'lastOperation': {'$last': '$created_at'}}}]
+
+                ops = op_catalog_sess.run_aggregation(coll_name=cliargs['cluster_name'], aggr_pipeline=pipeline)
+                for op in ops:
+                    print 'Database Name        : {}'.format(op['_id'])
+                    print 'First Op Date & Time : {}'.format(op['firstOperation'])
+                    print 'Last Op Date & Time  : {}'.format(op['lastOperation'])
+                    print ''
 
 if __name__ == '__main__':
     main()
