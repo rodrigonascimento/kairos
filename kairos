@@ -104,6 +104,7 @@ def cmdargs():
     oplog.add_argument('--list-ops', action='store_true', help='List the first and last archived op per database')
     oplog.add_argument('--start', action='store_true', help='Start an Oplog Archiver')
     oplog.add_argument('--stop', action='store_true', help='Stop an Oplog Archiver')
+    oplog.add_argument('--status', action='store_true', help='Show the status of each archiver process.')
     oplog.add_argument('--cluster-name', type=str, help='MongoDB Cluster name')
     oplog.add_argument('--archiver-name', type=str, help='Oplog Archiver name')
     oplog.add_argument('--db-name', type=str, help='Database name')
@@ -415,6 +416,7 @@ def main():
                 clone.list(kairos_repo)
                 sys.exit(0)
 
+    # -- if subcommand is archiver
     if cliargs['which'] == 'archiver':
         if cliargs['create']:
             if (cliargs['archiver_name'] is None) or (cliargs['cluster_name'] is None) or (cliargs['db_name'] is None) \
@@ -460,11 +462,14 @@ def main():
                 logging.error('You have to specify a cluster name to get a list of the archivers.')
                 sys.exit(1)
             else:
-                arch_spec = dict()
-                arch_spec['cluster_name'] = cliargs['cluster_name']
-                arch = SubCmdArchiver(archiver_spec=arch_spec)
+                for archiver in SubCmdArchiver.list(catalog_sess=catalog, cluster_name=cliargs['cluster_name']):
+                    print 'Cluster Name     : {}'.format(archiver['cluster_name'])
+                    print 'Archiver Name    : {}'.format(archiver['archiver_name'])
+                    print 'Database Name    : {}'.format(archiver['database_name'])
+                    print 'Collections List : {}'.format(
+                        ' '.join([collection for collection in archiver['collections']]))
+                    print ''
 
-                arch.list(catalog_sess=catalog)
                 sys.exit(0)
 
         if cliargs['start']:
@@ -529,6 +534,18 @@ def main():
                         logging.error('There is no archiver {} running for cluster {}.'.format(archiver['archiver_name'],
                                                                                                archiver['cluster_name']))
                         sys.exit(1)
+
+        if cliargs['status']:
+            if cliargs['cluster_name'] is None:
+                logging.error('You have to specify a MongoDB cluster name.')
+                sys.exit(1)
+            else:
+                for archiver in SubCmdArchiver.list(catalog_sess=catalog, cluster_name=cliargs['cluster_name']):
+                    arch_status = SubCmdArchiver(archiver_spec=archiver)
+                    if arch_status.status(catalog_sess=catalog):
+                        print 'Archiver Name: {} \t\t Status: {}'.format(archiver['archiver_name'], 'Running')
+                    else:
+                        print 'Archiver Name: {} \t\t Status: {}'.format(archiver['archiver_name'], 'Not running')
 
         if cliargs['list_ops']:
             if cliargs['cluster_name'] is None:

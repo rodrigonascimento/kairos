@@ -1726,15 +1726,10 @@ class SubCmdArchiver:
     def delete(self, catalog_sess=None):
         catalog_sess.remove_one(coll_name='archivers', query={'cluster_name': self.arch_spec['cluster_name'],
                                                               'archiver_name': self.arch_spec['archiver_name']})
-
-    def list(self, catalog_sess=None):
-        archivers = catalog_sess.find_all(coll_name='archivers', query={'cluster_name': self.arch_spec['cluster_name']})
-        for archiver in archivers:
-            print 'Cluster Name     : {}'.format(archiver['cluster_name'])
-            print 'Archiver Name    : {}'.format(archiver['archiver_name'])
-            print 'Database Name    : {}'.format(archiver['database_name'])
-            print 'Collections List : {}'.format(' '.join([collection for collection in archiver['collections']]))
-            print ''
+    @staticmethod
+    def list(catalog_sess=None, cluster_name=None):
+        archivers = catalog_sess.find_all(coll_name='archivers', query={'cluster_name': cluster_name})
+        return archivers
 
     def stop(self, catalog_sess=None):
             Process(int(self.arch_spec['ppid'])).terminate()
@@ -1755,3 +1750,26 @@ class SubCmdArchiver:
                           update={'$set': { 'pidfile': appKAPTR.get_pidfilename()}})
 
         appKAPTR.start()
+
+    def status(self, catalog_sess=None):
+        # Getting the PID filename from Kairos' repository
+        archiver = catalog_sess.find_one(coll_name='archivers',
+                                         query={'cluster_name': self.arch_spec['cluster_name'],
+                                                'archiver_name': self.arch_spec['archiver_name']})
+
+        # Opening the PID file and getting the archiver PID
+        if 'pidfile' not in archiver.keys():
+            return False
+        else:
+            try:
+                pidfile = open(archiver['pidfile'], 'r')
+                ppid = pidfile.readline()
+            except IOError, e:
+                logging.error(e)
+                return False
+
+            # Instanciating a process to get info about it
+            proc = Process(int(ppid))
+
+            if proc.name() == 'python' and self.arch_spec['archiver_name'] in proc.cmdline():
+                return True
