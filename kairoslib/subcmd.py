@@ -5,12 +5,14 @@ import multiprocessing as mp
 import multiprocessing.queues
 import xml.dom.minidom
 
+from arch_temp_data import ArchTempData
 from datetime import datetime, timedelta
 from host_conn import HostConn
+from kairoslib.kairos_aptr import AppKairosAPTR
 from mongodbcluster import MongoDBCluster
 from ontap import ClusterSession, Snapshot, FlexClone, InitiatorGroup, Lun, Volume
+from psutil import Process
 from pymongo import MongoClient, errors
-from arch_temp_data import ArchTempData
 from recover_consumer import RecoverConsumer
 from sys import exit
 from time import sleep, time
@@ -1712,3 +1714,44 @@ class SubCmdRecover:
         atd.destroy_temp_data()
 
         logging.info('Recover process has been completed.')
+
+
+class SubCmdArchiver:
+    def __init__(self, archiver_spec=None):
+        self.arch_spec = archiver_spec
+
+    def create(self, catalog_sess=None):
+        catalog_sess.add(coll_name='archivers', doc=self.arch_spec)
+
+    def delete(self, catalog_sess=None):
+        catalog_sess.remove_one(coll_name='archivers', query={'cluster_name': self.arch_spec['cluster_name'],
+                                                              'archiver_name': self.arch_spec['archiver_name']})
+
+    def list(self, catalog_sess=None):
+        archivers = catalog_sess.find_all(coll_name='archivers', query={'cluster_name': self.arch_spec['cluster_name']})
+        for archiver in archivers:
+            print 'Cluster Name     : {}'.format(archiver['cluster_name'])
+            print 'Archiver Name    : {}'.format(archiver['archiver_name'])
+            print 'Database Name    : {}'.format(archiver['database_name'])
+            print 'Collections List : {}'.format(' '.join([collection for collection in archiver['collections']]))
+            print ''
+
+    def stop(self, catalog_sess=None):
+            Process(int(self.arch_spec['ppid'])).terminate()
+            catalog_sess.edit(coll_name='archivers', query={'cluster_name': self.arch_spec['cluster_name'],
+                                                            'archiver_name': self.arch_spec['archiver_name']},
+                              update={'$unset': {'pidfile': ''}})
+
+    def start(self, catalog_sess=None):
+        appKAPTR = AppKairosAPTR(cluster_name=self.arch_spec['cluster_name'],
+                                 database_name=self.arch_spec['database_name'],
+                                 collections=self.arch_spec['collections'], mongodb_uri=self.arch_spec['mongodb_uri'],
+                                 archiver_name=self.arch_spec['archiver_name'],
+                                 archive_repo_uri=self.arch_spec['archive_repo_uri'],
+                                 archive_repo_name=self.arch_spec['archive_repo_name'])
+
+        catalog_sess.edit(coll_name='archivers', query={'cluster_name': self.arch_spec['cluster_name'],
+                                                        'archiver_name': self.arch_spec['archiver_name']},
+                          update={'$set': { 'pidfile': appKAPTR.get_pidfilename()}})
+
+        appKAPTR.start()

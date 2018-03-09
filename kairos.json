@@ -9,6 +9,6 @@
   },
   "kairos-oplog-archive" : {
     "archiver-uri"    : "mongodb://10.61.105.13:27017",
-    "archiver-dbname" : "oplogArchiver"
+    "archiver-dbname" : "kairos_op_archive"
   }
 }

@@ -6,8 +6,7 @@ import pymongo.errors
 import threading
 import daemon
 import daemon.pidfile
-from time import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from kairoslib.catalog import Catalog
 
 LOGGER = logging.getLogger(__name__)
@@ -46,7 +45,6 @@ class Producer(threading.Thread):
             LOGGER.error(e)
             exit(1)
 
-
     def run(self):
         while True:
             try:
@@ -59,14 +57,15 @@ class Producer(threading.Thread):
 
 class AppKairosAPTR:
     def __init__(self, cluster_name=None, database_name=None, collections=None, mongodb_uri=None, archiver_name=None,
-                 kairoscfg=None):
+                 archive_repo_uri=None, archive_repo_name=None):
         self.cluster_name = cluster_name
         self.archiver_name = archiver_name
         self.mongodb_uri = mongodb_uri
         self.database_name = database_name
         self.collections = collections
         self.pidfilepath = '/tmp/kairosAPITR_' + self.cluster_name + '_' + self.archiver_name + '.pid'
-        self.kcfg = kairoscfg
+        self.archive_repo_uri = archive_repo_uri
+        self.archive_repo_name = archive_repo_name
 
         self.pidfile = daemon.pidfile.PIDLockFile(self.pidfilepath)
         self.context = daemon.DaemonContext(detach_process=True, pidfile=self.pidfile)
@@ -78,8 +77,8 @@ class AppKairosAPTR:
             for coll in self.collections:
                 producers.append(Producer(cluster_name=self.cluster_name, mongodb_uri=self.mongodb_uri,
                                           database=self.database_name, collection=coll,
-                                          archiver_repo_uri=self.kcfg['kairos-oplog-archive']['archiver-uri'],
-                                          archiver_repo_dbname=self.kcfg['kairos-oplog-archive']['archiver-dbname']))
+                                          archiver_repo_uri=self.archive_repo_uri,
+                                          archiver_repo_dbname=self.archive_repo_name))
 
             for producer in producers:
                 producer.setDaemon(True)

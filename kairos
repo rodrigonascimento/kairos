@@ -19,12 +19,11 @@ import json
 import pymongo
 import logging
 from datetime import datetime
-from psutil import Process
 from time import time, sleep, strftime
 from kairoslib.subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup, SubCmdRecovery, SubCmdClone, SubCmdRecover
+from kairoslib.subcmd import SubCmdArchiver
 from kairoslib.mongodbcluster import MongoDBCluster
 from kairoslib.catalog import Catalog
-from kairoslib.kairos_aptr import AppKairosAPTR
 
 
 def cmdargs():
@@ -98,19 +97,18 @@ def cmdargs():
     clone.add_argument('--desc', type=str, help='Description about your clone')
     clone.set_defaults(which='clone')
 
-    oplog = subcmd.add_parser('oplog')
+    oplog = subcmd.add_parser('archiver')
     oplog.add_argument('--create', action='store_true', help='Create an oplog archiver for a given cluster')
     oplog.add_argument('--delete', action='store_true', help='Delete an oplog archiver from a given cluster')
-    oplog.add_argument('--list-archivers', action='store_true', help='List all oplog archivers for a given mongodb cluster')
+    oplog.add_argument('--list', action='store_true', help='List all oplog archivers for a given mongodb cluster')
+    oplog.add_argument('--list-ops', action='store_true', help='List the first and last archived op per database')
     oplog.add_argument('--start', action='store_true', help='Start an Oplog Archiver')
     oplog.add_argument('--stop', action='store_true', help='Stop an Oplog Archiver')
-    oplog.add_argument('--list-ops', action='store_true', help='List the first and last archived op per database')
     oplog.add_argument('--cluster-name', type=str, help='MongoDB Cluster name')
     oplog.add_argument('--archiver-name', type=str, help='Oplog Archiver name')
-    oplog.add_argument('--retention', type=str, help='Backup retention [ 15m(in), 1h(our), 1d(ay), 1w(eek) ]')
     oplog.add_argument('--db-name', type=str, help='Database name')
     oplog.add_argument('--collections', dest='collections_list', nargs='+', help='List of collections')
-    oplog.set_defaults(which='oplog')
+    oplog.set_defaults(which='archiver')
 
     return vars(cmdopts.parse_args())
 
@@ -417,7 +415,7 @@ def main():
                 clone.list(kairos_repo)
                 sys.exit(0)
 
-    if cliargs['which'] == 'oplog':
+    if cliargs['which'] == 'archiver':
         if cliargs['create']:
             if (cliargs['archiver_name'] is None) or (cliargs['cluster_name'] is None) or (cliargs['db_name'] is None) \
                     or (cliargs['collections_list'] is None):
@@ -430,37 +428,43 @@ def main():
                     logging.error('Could not find {} MongoDB Cluster in Kairos repository.'.format(cliargs['cluster_name']))
                     sys.exit(1)
                 else:
-                    oplogArchiver = dict()
-                    oplogArchiver['cluster_name'] = cliargs['cluster_name']
-                    oplogArchiver['archiver_name'] = cliargs['archiver_name']
-                    oplogArchiver['database_name'] = cliargs['db_name']
-                    oplogArchiver['collections'] = cliargs['collections_list']
-                    catalog.add(coll_name='oplogArchivers', doc=oplogArchiver)
-                    logging.info('Oplog Archiver {} has been created for {} cluster.'.format(cliargs['archiver_name'],
-                                                                                             cliargs['cluster_name']))
+                    arch_spec = dict()
+                    arch_spec['cluster_name'] = cliargs['cluster_name']
+                    arch_spec['archiver_name'] = cliargs['archiver_name']
+                    arch_spec['database_name'] = cliargs['db_name']
+                    arch_spec['collections'] = cliargs['collections_list']
+                    arch = SubCmdArchiver(archiver_spec=arch_spec)
+
+                    arch.create(catalog_sess=catalog)
+                    logging.info('Archiver {} has been created for {} cluster.'.format(cliargs['archiver_name'],
+                                                                                       cliargs['cluster_name']))
+                    sys.exit(0)
 
         if cliargs['delete']:
             if (cliargs['archiver_name'] is None) or (cliargs['cluster_name'] is None):
                 logging.error('You must enter a MongoDB Cluster, and an archiver name to delete an oplog archiver.')
                 sys.exit(1)
             else:
-                catalog.remove_one(coll_name='oplogArchivers', query={'cluster_name': cliargs['cluster_name'],
-                                                                      'archiver_name': cliargs['archiver_name']})
+                arch_spec = dict()
+                arch_spec['cluster_name'] = cliargs['cluster_name']
+                arch_spec['archiver_name'] = cliargs['archiver_name']
+                arch = SubCmdArchiver(archiver_spec=arch_spec)
+
+                arch.delete(catalog_sess=catalog)
                 logging.info('Archiver {} on Cluster {} has been successfully deleted.'.format(cliargs['archiver_name'],
                                                                                                cliargs['cluster_name']))
                 sys.exit(0)
 
-        if cliargs['list_archivers']:
+        if cliargs['list']:
             if cliargs['cluster_name'] is None:
                 logging.error('You have to specify a cluster name to get a list of the archivers.')
                 sys.exit(1)
             else:
-                for archiver in catalog.find_all(coll_name='oplogArchivers', query={'cluster_name': cliargs['cluster_name']}):
-                    print 'Cluster Name     : {}'.format(archiver['cluster_name'])
-                    print 'Archiver Name    : {}'.format(archiver['archiver_name'])
-                    print 'Database Name    : {}'.format(archiver['database_name'])
-                    print 'Collections List : {}'.format(' '.join([collection for collection in archiver['collections']]))
-                    print ''
+                arch_spec = dict()
+                arch_spec['cluster_name'] = cliargs['cluster_name']
+                arch = SubCmdArchiver(archiver_spec=arch_spec)
+
+                arch.list(catalog_sess=catalog)
                 sys.exit(0)
 
         if cliargs['start']:
@@ -468,7 +472,7 @@ def main():
                 logging.error('You must enter a MongoDB Cluster, and an archiver name to start an oplog archiver.')
                 sys.exit(1)
             else:
-                archiver = catalog.find_one(coll_name='oplogArchivers', query={'cluster_name': cliargs['cluster_name'],
+                archiver = catalog.find_one(coll_name='archivers', query={'cluster_name': cliargs['cluster_name'],
                                                                                'archiver_name': cliargs['archiver_name']
                                                                                })
                 if archiver is None:
@@ -483,45 +487,47 @@ def main():
                     else:
                         mongouri = mdbcluster['mongodb-uri']
 
-                    appKAPTR = AppKairosAPTR(cluster_name=archiver['cluster_name'], database_name=archiver['database_name'],
-                                             collections=archiver['collections'], mongodb_uri=mongouri,
-                                             archiver_name=archiver['archiver_name'], kairoscfg=kcfg)
+                    # variable archiver has been used as arch_spec; adding: mongouri, archive_repo_name,
+                    # archive_repo_uri
+                    archiver['mongodb_uri'] = mongouri
+                    archiver['archive_repo_uri'] = kcfg['kairos-oplog-archive']['archiver-uri']
+                    archiver['archive_repo_name'] = kcfg['kairos-oplog-archive']['archiver-dbname']
+                    arch = SubCmdArchiver(archiver_spec=archiver)
 
-                    catalog.edit(coll_name='oplogArchivers', query={'cluster_name': archiver['cluster_name'],
-                                                                    'archiver_name': archiver['archiver_name']},
-                                 update={'$set': { 'pidfile': appKAPTR.get_pidfilename()}})
-
-                    appKAPTR.start()
+                    arch.start(catalog_sess=catalog)
 
         if cliargs['stop']:
             if (cliargs['archiver_name'] is None) or (cliargs['cluster_name'] is None):
                 logging.error('You must enter a MongoDB Cluster, and an archiver name to start an oplog archiver.')
                 sys.exit(1)
             else:
-                archiver = catalog.find_one(coll_name='oplogArchivers', query={'cluster_name': cliargs['cluster_name'],
-                                                                               'archiver_name': cliargs['archiver_name']
-                                                                               })
+                # Checking if the archiver provided by the user actually exists in the repository
+                archiver = catalog.find_one(coll_name='archivers', query={'cluster_name': cliargs['cluster_name'],
+                                                                          'archiver_name': cliargs['archiver_name']
+                                                                          })
                 if archiver is None:
                     logging.error('Could not find archiver {} for cluster {}.'.format(cliargs['archiver_name'],
                                                                                       cliargs['cluster_name']))
                     sys.exit(1)
                 else:
                     if 'pidfile' in archiver:
+                        # Getting the archiver process pid
                         with open(archiver['pidfile'], 'r') as pidfile:
                             ppid = pidfile.readline()
 
-                        kairos_proc = Process(int(ppid))
-                        kairos_proc.terminate()
+                        arch_spec = dict()
+                        arch_spec['cluster_name'] = archiver['cluster_name']
+                        arch_spec['archiver_name'] = archiver['archiver_name']
+                        arch_spec['ppid'] = ppid
+                        arch = SubCmdArchiver(archiver_spec=arch_spec)
 
-                        catalog.edit(coll_name='oplogArchivers', query={'cluster_name': archiver['cluster_name'],
-                                                                        'archiver_name': archiver['archiver_name']},
-                                     update={'$unset': {'pidfile': ''} })
+                        arch.stop(catalog_sess=catalog)
                         logging.info('Archiver {} for cluster {} has been stopped.'.format(archiver['archiver_name'],
                                                                                            archiver['cluster_name']))
                         sys.exit(0)
                     else:
-                        logging.error('Archiver {} for cluster {} is not running.'.format(archiver['archiver_name'],
-                                                                                          archiver['cluster_name']))
+                        logging.error('There is no archiver {} running for cluster {}.'.format(archiver['archiver_name'],
+                                                                                               archiver['cluster_name']))
                         sys.exit(1)
 
         if cliargs['list_ops']:
@@ -547,4 +553,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    
