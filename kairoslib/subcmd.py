@@ -370,17 +370,17 @@ class SubCmdBackup:
             return created_at + timedelta(weeks=int(value))
 
 
-class SubCmdRecovery:
+class SubCmdRestore:
     def __init__(self, rst_spec=None):
         self.backup_name = rst_spec['backup-name']
         self.cluster_name = rst_spec['cluster-name']
         self.username = rst_spec['username']
-        if 'recovery_point' in rst_spec:
-            self.recovery_point = rst_spec['recovery_point']
+        self.archive_repo_uri = rst_spec['archive_repo_uri']
+        self.archive_repo_name = rst_spec['archive_repo_name']
 
-    def restore(self, kdb_session=None):
-        kdb_backup = kdb_session['backups']
-        bkp2restore = kdb_backup.find_one({'backup_name': self.backup_name, 'cluster_name': self.cluster_name})
+    def restore(self, catalog_sess=None):
+        bkp2restore = catalog_sess.find_one(coll_name='backups', query={'backup_name': self.backup_name,
+                                                                        'cluster_name': self.cluster_name})
 
         if bkp2restore is None:
             logging.error('Backup {} could not be found for cluster {}.'.format(self.backup_name, self.cluster_name))
@@ -538,10 +538,9 @@ class SubCmdRecovery:
                                 snaprestore_list[vol['svm-name']].append(vol['volume'])
                             else:
                                 snaprestore_list[vol['svm-name']].append(vol['volume'])
-        
-        kdb_netapp = kdb_session['ntapsystems']
+
         for svm in snaprestore_list.keys():
-            svm_info = kdb_netapp.find_one({'svm-name': svm})
+            svm_info = catalog_sess.find_one(coll_name='ntapsystems', query={'svm-name': svm})
             cs_svm = ClusterSession(svm_info['netapp-ip'], svm_info['username'], svm_info['password'],
                                     svm_info['svm-name'])
             for volume in snaprestore_list[svm]:
@@ -678,8 +677,8 @@ class SubCmdRecovery:
                         logging.info('MongoDB has been started on host {}.'.format(shard_member['name'].split(':')[0]))
 
         # -- Housekeeping on backup's metadata
-        delete_newers = kdb_backup.delete_many({'created_at': { '$gt': bkp2restore['created_at']}})
-        logging.info('{} backups has been removed from the backup catalog.'.format(delete_newers.deleted_count))
+        delete_newers = catalog_sess.remove_many(coll_name='backups', query={'created_at':
+                                                                                 { '$gt': bkp2restore['created_at']}})
 
 
 class SubCmdClone:
@@ -1732,10 +1731,20 @@ class SubCmdArchiver:
         return archivers
 
     def stop(self, catalog_sess=None):
-            Process(int(self.arch_spec['ppid'])).terminate()
-            catalog_sess.edit(coll_name='archivers', query={'cluster_name': self.arch_spec['cluster_name'],
-                                                            'archiver_name': self.arch_spec['archiver_name']},
-                              update={'$unset': {'pidfile': ''}})
+        pidfilename = catalog_sess.find_one(coll_name='archivers',
+                                            query={'cluster_name': self.arch_spec['cluster_name'],
+                                                   'archiver_name': self.arch_spec['archiver_name']})['pidfile']
+
+        try:
+            pidfile = open(pidfilename, 'r')
+            ppid = pidfile.readline()
+        except IOError, e:
+            logging.error(e)
+
+        Process(int(ppid)).terminate()
+        catalog_sess.edit(coll_name='archivers', query={'cluster_name': self.arch_spec['cluster_name'],
+                                                        'archiver_name': self.arch_spec['archiver_name']},
+                          update={'$unset': {'pidfile': ''}})
 
     def start(self, catalog_sess=None):
         appKAPTR = AppKairosAPTR(cluster_name=self.arch_spec['cluster_name'],

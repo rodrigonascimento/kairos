@@ -20,7 +20,7 @@ import pymongo
 import logging
 from datetime import datetime
 from time import time, sleep, strftime
-from kairoslib.subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup, SubCmdRecovery, SubCmdClone, SubCmdRecover
+from kairoslib.subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup, SubCmdRestore, SubCmdClone, SubCmdRecover
 from kairoslib.subcmd import SubCmdArchiver
 from kairoslib.mongodbcluster import MongoDBCluster
 from kairoslib.catalog import Catalog
@@ -108,6 +108,7 @@ def cmdargs():
     oplog.add_argument('--cluster-name', type=str, help='MongoDB Cluster name')
     oplog.add_argument('--archiver-name', type=str, help='Oplog Archiver name')
     oplog.add_argument('--db-name', type=str, help='Database name')
+    oplog.add_argument('--all-collections', action='store_true', help='Archive operations for all collections of a database')
     oplog.add_argument('--collections', dest='collections_list', nargs='+', help='List of collections')
     oplog.set_defaults(which='archiver')
 
@@ -326,14 +327,16 @@ def main():
         restore_spec['backup-name'] = cliargs['backup_name']
         restore_spec['cluster-name'] = cliargs['cluster_name']
         restore_spec['username'] = kcfg['kairos']['username']
+        restore_spec['archive_repo_uri'] = kcfg['kairos-oplog-archive']['archiver-uri']
+        restore_spec['archive_repo_name'] = kcfg['kairos-oplog-archive']['archiver-dbname']
 
-        pit_restore = SubCmdRecovery(restore_spec)
+        pit_restore = SubCmdRestore(restore_spec)
 
         if (restore_spec['cluster-name'] is None) or (restore_spec['backup-name'] is None):
             logging.error('You must enter a cluster-name and a backup-name to be able to trigger a restore.')
             sys.exit(1)
         else:
-            pit_restore.restore(kairos_repo)
+            pit_restore.restore(catalog_sess=catalog)
             sys.exit(0)
 
     # -- if subcommand is recover
@@ -419,8 +422,7 @@ def main():
     # -- if subcommand is archiver
     if cliargs['which'] == 'archiver':
         if cliargs['create']:
-            if (cliargs['archiver_name'] is None) or (cliargs['cluster_name'] is None) or (cliargs['db_name'] is None) \
-                    or (cliargs['collections_list'] is None):
+            if (cliargs['archiver_name'] is None) or (cliargs['cluster_name'] is None) or (cliargs['db_name'] is None):
                 logging.error('Provide an archiver name, mongodb cluster name, a retention, database name and a list '
                               'of collections to create an oplog archiver.')
                 sys.exit(1)
@@ -434,7 +436,18 @@ def main():
                     arch_spec['cluster_name'] = cliargs['cluster_name']
                     arch_spec['archiver_name'] = cliargs['archiver_name']
                     arch_spec['database_name'] = cliargs['db_name']
-                    arch_spec['collections'] = cliargs['collections_list']
+                    if cliargs['all_collections']:
+                        if mdbcluster['sharded']:
+                            mongocluster = MongoDBCluster(mongodb_uri=mdbcluster['mongodb-uri'])
+                            mongouri = mongocluster.get_mongos_uri()
+                        else:
+                            mongouri = mdbcluster['mongodb-uri']
+
+                        mongocluster = MongoDBCluster(mongodb_uri=mongouri)
+                        arch_spec['collections'] = mongocluster.get_collections(cliargs['db_name'])
+                    else:
+                        arch_spec['collections'] = cliargs['collections_list']
+
                     arch = SubCmdArchiver(archiver_spec=arch_spec)
 
                     arch.create(catalog_sess=catalog)
@@ -516,14 +529,9 @@ def main():
                     sys.exit(1)
                 else:
                     if 'pidfile' in archiver:
-                        # Getting the archiver process pid
-                        with open(archiver['pidfile'], 'r') as pidfile:
-                            ppid = pidfile.readline()
-
                         arch_spec = dict()
                         arch_spec['cluster_name'] = archiver['cluster_name']
                         arch_spec['archiver_name'] = archiver['archiver_name']
-                        arch_spec['ppid'] = ppid
                         arch = SubCmdArchiver(archiver_spec=arch_spec)
 
                         arch.stop(catalog_sess=catalog)

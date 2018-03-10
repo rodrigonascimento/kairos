@@ -93,6 +93,14 @@ class Catalog:
         except errors.InvalidOperation:
             return -1
 
+    def remove_many(self, coll_name=None, query=None):
+        coll = self.kairosdb[coll_name]
+        try:
+            result = coll.delete_many(query)
+            return result.deleted_count
+        except errors.InvalidOperation:
+            return -1
+
     def find_all(self, coll_name=None, query=None, ordered=None):
         coll = self.kairosdb[coll_name]
         if ordered is not None:
