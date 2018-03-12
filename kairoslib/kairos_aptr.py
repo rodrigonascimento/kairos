@@ -85,8 +85,7 @@ class AppKairosAPTR:
                 producer.start()
 
             while True:
-                for producer in producers:
-                    producer.join()
+                pass
 
     def get_pidfilename(self):
         return self.pidfilepath
