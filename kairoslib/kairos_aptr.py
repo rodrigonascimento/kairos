@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 
 import logging
 import pymongo
@@ -27,32 +27,43 @@ class Producer(threading.Thread):
         self.archiver_repo_sess = Catalog(repo_uri=self.archiver_repo_uri, repo_name=self.archiver_repo_dbname)
         self.archiver_repo_sess.connect()
 
-        try:
-            last_op = self.archiver_repo_sess.find_one(coll_name=self.cluster_name, query={'ns.db': self.database,
-                                                                                           'ns.coll': self.collection},
-                                                       ordered=[('_id', pymongo.DESCENDING)])
+        l_invalid_op = self.archiver_repo_sess.find_one(coll_name=self.cluster_name,
+                                                        query={'ns.db': self.database,
+                                                               'ns.coll': self.collection,
+                                                               'operationType': 'invalidate'},
+                                                        ordered=[('_id', pymongo.DESCENDING)])
 
-            self.mongo_sess = pymongo.MongoClient(self.mongodb_uri, connect=True)
-            db = self.mongo_sess[self.database]
-            self.watching_collec = db[self.collection]
+        l_valid_op = self.archiver_repo_sess.find_one(coll_name=self.cluster_name,
+                                                      query={'ns.db': self.database, 'ns.coll': self.collection},
+                                                      ordered=[('_id', pymongo.DESCENDING)])
 
-            if last_op is None:
+        self.mongo_sess = pymongo.MongoClient(self.mongodb_uri, connect=True)
+        db = self.mongo_sess[self.database]
+        self.watching_collec = db[self.collection]
+
+        if l_invalid_op is None:
+            if l_valid_op is None:
                 self.collec_cursor = self.watching_collec.watch(full_document='updateLookup')
             else:
-                self.collec_cursor = self.watching_collec.watch(resume_after=last_op['_id'],
+                self.collec_cursor = self.watching_collec.watch(resume_after=l_valid_op['_id'],
                                                                 full_document='updateLookup')
-        except (pymongo.errors.ConnectionFailure or pymongo.errors.OperationFailure), e:
-            LOGGER.error(e)
-            exit(1)
+        else:
+                self.collec_cursor = self.watching_collec.watch(full_document='updateLookup')
 
     def run(self):
         while True:
             try:
                 op = next(self.collec_cursor)
+                if op['operationType'] == 'invalidate':
+                    op['ns'] = dict()
+                    op['ns']['db'] = self.database
+                    op['ns']['coll'] = self.collection
                 op['created_at'] = datetime.now()
                 self.archiver_repo_sess.add(coll_name=self.cluster_name, doc=op)
-            except pymongo.errors.PyMongoError, e:
-                LOGGER.error(e)
+            except (StopIteration, pymongo.errors.OperationFailure):
+                db = self.mongo_sess[self.database]
+                self.watching_collec = db[self.collection]
+                self.collec_cursor = self.watching_collec.watch(full_document='updateLookup')
 
 
 class AppKairosAPTR:

@@ -1,9 +1,8 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 
 import logging
 import pymongo
 import pymongo.errors
-import multiprocessing as mp
 from kairoslib.catalog import Catalog
 
 LOGGER = logging.getLogger(__name__)

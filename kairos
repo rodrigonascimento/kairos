@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 
 # -- Summary --------------------------------------------------------------------------------------------------------
 #
@@ -21,7 +21,7 @@ import logging
 from datetime import datetime
 from time import time, sleep, strftime
 from kairoslib.subcmd import SubCmdMongodb, SubCmdNetapp, SubCmdBackup, SubCmdRestore, SubCmdClone, SubCmdRecover
-from kairoslib.subcmd import SubCmdArchiver
+from kairoslib.subcmd import SubCmdArchiver, SubCmdOperations
 from kairoslib.mongodbcluster import MongoDBCluster
 from kairoslib.catalog import Catalog
 
@@ -80,10 +80,12 @@ def cmdargs():
     restore.set_defaults(which='restore')
 
     recover = subcmd.add_parser('recover')
+    recover.add_argument('--run', action='store_true', help='Run the recover operation')
     recover.add_argument('--from-cluster-name', type=str, help='Archived operations from a given MongoDB cluster.')
     recover.add_argument('--dest-mongodb-uri', type=str, help='MongoDB Cluster where the archived operations will be applied to.')
-    recover.add_argument('--begin-from', type=str, help='')
-    recover.add_argument('--until', type=str, help='')
+    recover.add_argument('--from-date', type=str, help='')
+    recover.add_argument('--until-date', type=str, help='')
+    recover.add_argument('--advanced-recover', type=str, help='Allows you to run advanced recover operations.')
     recover.set_defaults(which='recover')
 
     clone = subcmd.add_parser('clone')
@@ -101,7 +103,6 @@ def cmdargs():
     oplog.add_argument('--create', action='store_true', help='Create an oplog archiver for a given cluster')
     oplog.add_argument('--delete', action='store_true', help='Delete an oplog archiver from a given cluster')
     oplog.add_argument('--list', action='store_true', help='List all oplog archivers for a given mongodb cluster')
-    oplog.add_argument('--list-ops', action='store_true', help='List the first and last archived op per database')
     oplog.add_argument('--start', action='store_true', help='Start an Oplog Archiver')
     oplog.add_argument('--stop', action='store_true', help='Stop an Oplog Archiver')
     oplog.add_argument('--status', action='store_true', help='Show the status of each archiver process.')
@@ -111,6 +112,14 @@ def cmdargs():
     oplog.add_argument('--all-collections', action='store_true', help='Archive operations for all collections of a database')
     oplog.add_argument('--collections', dest='collections_list', nargs='+', help='List of collections')
     oplog.set_defaults(which='archiver')
+
+    operations = subcmd.add_parser('operations')
+    operations.add_argument('--cluster-name', type=str, help='MongoDB Cluster name')
+    operations.add_argument('--summary', action='store_true', help='List the first and last archived operations per database')
+    operations.add_argument('--detail', action='store_true', help='List number of operations/database/collection')
+    operations.add_argument('--from-date', type=str, help='')
+    operations.add_argument('--until-date')
+    operations.set_defaults(which='operations')
 
     return vars(cmdopts.parse_args())
 
@@ -340,33 +349,41 @@ def main():
             sys.exit(0)
 
     # -- if subcommand is recover
-    if cliargs['which'] == 'recover':
-        recover_spec = dict()
-        recover_spec['from-cluster-name'] = cliargs['from_cluster_name']
-        recover_spec['dest-mongodb-uri'] = cliargs['dest_mongodb_uri']
-        recover_spec['until'] = cliargs['until']
-        recover_spec['arch-repo-uri'] = kcfg['kairos-oplog-archive']['archiver-uri']
-        recover_spec['arch-repo-name'] = kcfg['kairos-oplog-archive']['archiver-dbname']
-        # -- validating date format before to create the recover object
-        if len(cliargs['begin_from']) == 19:
-            recover_spec['begin-from'] = datetime.strptime(cliargs['begin_from'], '%Y-%m-%d %H:%M:%S')
-        elif len(cliargs['begin_from']) == 26:
-            recover_spec['begin-from'] = datetime.strptime(cliargs['begin_from'], '%Y-%m-%d %H:%M:%S.%f')
+    if cliargs['which'] == 'recover' and cliargs['run']:
+        if (cliargs['from_cluster_name'] is None) or (cliargs['dest_mongodb_uri'] is None) or \
+            (cliargs['from_date'] is None) or (cliargs['until_date'] is None):
+            logging.error('All options except --advanced-recover are mandatory.')
+            sys.exit(1)
         else:
-            logging.error('--begin-from Invalid date and time format.')
-            exit(1)
-        # -- validating date format before to create the recover object
-        if len(cliargs['until']) == 19:
-            recover_spec['until'] = datetime.strptime(cliargs['until'], '%Y-%m-%d %H:%M:%S')
-        elif len(cliargs['until']) == 26:
-            recover_spec['until'] = datetime.strptime(cliargs['until'], '%Y-%m-%d %H:%M:%S.%f')
-        else:
-            logging.error('--until Invalid date and time format.')
-            exit(1)
+            recover_spec = dict()
+            recover_spec['from-cluster-name'] = cliargs['from_cluster_name']
+            recover_spec['dest-mongodb-uri'] = cliargs['dest_mongodb_uri']
+            recover_spec['arch-repo-uri'] = kcfg['kairos-oplog-archive']['archiver-uri']
+            recover_spec['arch-repo-name'] = kcfg['kairos-oplog-archive']['archiver-dbname']
+            if cliargs['advanced_recover']:
+                advanced_recover_cfg = load_config_file(cliargs['advanced_recover'])
+                recover_spec['skip_op_cfg'] = advanced_recover_cfg
 
-        pit_recover = SubCmdRecover(recover_spec)
+            # -- validating date format before to create the recover object
+            if len(cliargs['from_date']) == 19:
+                recover_spec['from-date'] = datetime.strptime(cliargs['from_date'], '%Y-%m-%d %H:%M:%S')
+            elif len(cliargs['from_date']) == 26:
+                recover_spec['from-date'] = datetime.strptime(cliargs['from_date'], '%Y-%m-%d %H:%M:%S.%f')
+            else:
+                logging.error('--from-date Invalid date and time format.')
+                exit(1)
+            # -- validating date format before to create the recover object
+            if len(cliargs['until_date']) == 19:
+                recover_spec['until-date'] = datetime.strptime(cliargs['until_date'], '%Y-%m-%d %H:%M:%S')
+            elif len(cliargs['until_date']) == 26:
+                recover_spec['until-date'] = datetime.strptime(cliargs['until_date'], '%Y-%m-%d %H:%M:%S.%f')
+            else:
+                logging.error('--until-date Invalid date and time format.')
+                exit(1)
 
-        pit_recover.start()
+            pit_recover = SubCmdRecover(recover_spec)
+
+            pit_recover.start()
 
     # -- If subcommand is clone
     if cliargs['which'] == 'clone':
@@ -413,7 +430,7 @@ def main():
 
         if cliargs['list']:
             if cliargs['cluster_name'] is None:
-                logging.error('You must enter a clone-name and cluster-name to list your clones.')
+                logging.error('You must enter a cluster-name to list your clones.')
                 sys.exit(1)
             else:
                 clone.list(kairos_repo)
@@ -555,25 +572,67 @@ def main():
                     else:
                         print 'Archiver Name: {} \t\t Status: {}'.format(archiver['archiver_name'], 'Not running')
 
-        if cliargs['list_ops']:
+
+    # -- If subcommand is operations
+    if cliargs['which'] == 'operations':
+        # Connecting to kairos_op_archive catalog
+        op_catalog_sess = Catalog(repo_uri=kcfg['kairos-oplog-archive']['archiver-uri'],
+                                  repo_name=kcfg['kairos-oplog-archive']['archiver-dbname'])
+        op_catalog_sess.connect()
+
+        op_insight = SubCmdOperations(catalog_sess=op_catalog_sess)
+
+        if cliargs['summary']:
             if cliargs['cluster_name'] is None:
                 logging.error('You must enter a MongoDB Cluster to list the archived operations per database.')
                 sys.exit(1)
             else:
-                op_catalog_sess = Catalog(repo_uri=kcfg['kairos-oplog-archive']['archiver-uri'],
-                                          repo_name=kcfg['kairos-oplog-archive']['archiver-dbname'])
-                op_catalog_sess.connect()
-
-                # Aggregation query to list the first and last operation grouped by database
-                pipeline = [{'$sort': {'created_at': 1}},
-                            {'$group': {'_id': '$ns.db', 'firstOperation': {'$first': '$created_at'},
-                                        'lastOperation': {'$last': '$created_at'}}}]
-
-                ops = op_catalog_sess.run_aggregation(coll_name=cliargs['cluster_name'], aggr_pipeline=pipeline)
+                ops = op_insight.get_first_and_last_ops_cluster(cluster_name=cliargs['cluster_name'])
                 for op in ops:
-                    print 'Database Name        : {}'.format(op['_id'])
-                    print 'First Op Date & Time : {}'.format(op['firstOperation'])
-                    print 'Last Op Date & Time  : {}'.format(op['lastOperation'])
+                    print '-- Cluster wide - Archived Operations -------------------------------------'
+                    print 'First Op Date & Time : "{}"'.format(op['firstOperation'])
+                    print 'Last Op Date & Time  : "{}"'.format(op['lastOperation'])
+                    print '---------------------------------------------------------------------------'
+                    print ''
+
+                ops = op_insight.get_first_and_last_ops_per_coll(cluster_name=cliargs['cluster_name'])
+                for op in ops:
+                    print 'Namespace : {}.{}'.format(op['_id']['dbname'], op['_id']['collname'])
+                    print 'First Op Date & Time : "{}"'.format(op['firstOperation'])
+                    print 'Last Op Date & Time  : "{}"'.format(op['lastOperation'])
+                    print ''
+
+        if cliargs['detail']:
+            if cliargs['cluster_name'] is None:
+                logging.error('You must enter a MongoDB Cluster to list the archived operations per database.')
+                sys.exit(1)
+            else:
+                # -- validating date format before to create the recover object
+                if len(cliargs['from_date']) == 19:
+                    op_from_date = datetime.strptime(cliargs['from_date'], '%Y-%m-%d %H:%M:%S')
+                elif len(cliargs['from_date']) == 26:
+                    op_from_date = datetime.strptime(cliargs['from_date'], '%Y-%m-%d %H:%M:%S.%f')
+                else:
+                    logging.error('--from-date Invalid date and time format.')
+                    exit(1)
+                # -- validating date format before to create the recover object
+                if len(cliargs['until_date']) == 19:
+                    op_until_date = datetime.strptime(cliargs['until_date'], '%Y-%m-%d %H:%M:%S')
+                elif len(cliargs['until_date']) == 26:
+                    op_until_date = datetime.strptime(cliargs['until_date'], '%Y-%m-%d %H:%M:%S.%f')
+                else:
+                    logging.error('--until-date Invalid date and time format.')
+                    exit(1)
+
+                ops_per_type = op_insight.get_ops_per_type(cluster_name=cliargs['cluster_name'],
+                                                           from_date=op_from_date,
+                                                           until_date=op_until_date
+                                                           )
+
+                for dbcoll in ops_per_type:
+                    print 'Namespace : {}.{}'.format(dbcoll['_id']['dbname'], dbcoll['_id']['collname'])
+                    for op_type in dbcoll['per_type']:
+                        print ''.join('   {} : {}'.format(op_type['op_type'], op_type['totalOps']))
                     print ''
 
 if __name__ == '__main__':

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 
 import logging
 import multiprocessing as mp
@@ -134,7 +134,6 @@ class SubCmdBackup:
 
         # -- backup metadata data structure
         bkp_metadata = dict()
-        bkp_metadata['created_at'] = datetime.now()
 
         # -- Getting MongoDB cluster topology
         topology = mdbcluster.get_topology()
@@ -237,6 +236,7 @@ class SubCmdBackup:
             mdbcluster.start_balancer()
 
         # -- Saving backup metadata to the repository database
+        bkp_metadata['created_at'] = datetime.now()
         bkp_metadata['backup_name'] = self.backup['backup-name']
         bkp_metadata['cluster_name'] = self.backup['cluster-name']
         bkp_metadata['mongo_topology'] = topology
@@ -332,8 +332,8 @@ class SubCmdBackup:
         result = kdb_bkps.find()
         print '{:30} \t {:30} {:30}'.format('Backup Name', 'Created At', 'Expires At')
         for bkp in result:
-            print '{:30} \t {:30} {:30}'.format(bkp['backup_name'], bkp['created_at'].strftime('%c %Z'),
-                                                bkp['retention'].strftime('%c %Z'))
+            print '{:30} \t {:30} {:30}'.format(bkp['backup_name'], bkp['created_at'].strftime('%Y-%m-%d %H:%M:%S.%f'),
+                                                bkp['retention'].strftime('%Y-%m-%d %H:%M:%S.%f'))
 
     def search_for_db(self, kdb_session, keyword):
         kdb_bkps = kdb_session['backups']
@@ -342,8 +342,8 @@ class SubCmdBackup:
         print '{:30} \t {:30} {:30}'.format('Backup Name', 'Created At', 'Retention')
         for bkp in result:
             print '{:30} \t {:30} {:30}'.format(bkp['backup_name'],
-                                                bkp['created_at'].strftime('%c %Z'),
-                                                bkp['retention'].strftime('%c %Z')
+                                                bkp['created_at'].strftime('%Y-%m-%d %H:%M:%S.%f'),
+                                                bkp['retention'].strftime('%Y-%m-%d %H:%M:%S.%f')
                                                 )
 
     def search_for_collection(self, kdb_session, database, collection):
@@ -353,8 +353,8 @@ class SubCmdBackup:
         print '{:30} \t {:30} {:30}'.format('Backup Name', 'Created At', 'Retention')
         for bkp in result:
             print '{:30} \t {:30} {:30}'.format(bkp['backup_name'],
-                                                bkp['created_at'].strftime('%c %Z'),
-                                                bkp['retention'].strftime('%c %Z')
+                                                bkp['created_at'].strftime('%Y-%m-%d %H:%M:%S.%f'),
+                                                bkp['retention'].strftime('%Y-%m-%d %H:%M:%S.%f')
                                                 )
 
     def _calc_retention(self, retention, created_at):
@@ -679,6 +679,8 @@ class SubCmdRestore:
         # -- Housekeeping on backup's metadata
         delete_newers = catalog_sess.remove_many(coll_name='backups', query={'created_at':
                                                                                  { '$gt': bkp2restore['created_at']}})
+        # -- restore completed
+        logging.info('Restore operation has been completed.')
 
 
 class SubCmdClone:
@@ -1360,8 +1362,15 @@ class SubCmdClone:
                     mdb_session.delete_doc(dbname='admin', collection='system.version',
                                            delete_filter={'_id': 'minOpTimeRecovery'})
 
-                    mdb_session.delete_doc(dbname='admin', collection='system.version',
-                                           delete_filter={'_id': 'shardIdentity'})
+                    # -- creating configsrvConnectionString
+                    conn_string = self.clone_spec['config_servers']['setname'] + '/'
+                    for spec_cs_member in self.clone_spec['config_servers']['members']:
+                        hostport = spec_cs_member['hostname'] + ':' + spec_cs_member['port']
+                        conn_string += hostport + ','
+
+                    mdb_session.update_doc(dbname='admin', collection='system.version',
+                                           update_filter={'_id': 'shardIdentity'},
+                                           update_doc={'$set': {'configsvrConnectionString': conn_string[:-1]}})
 
                     # -- Stopping MongoDB recover mode
                     result = host.run_command('pkill mongod')
@@ -1652,21 +1661,34 @@ class SubCmdClone:
     def list(self, kdb_session=None):
         kdb_clones = kdb_session['clones']
         result = kdb_clones.find({'cluster_name': self.cluster_name})
-        print '{:30} \t {:30} \t {:30} \t {:40}'.format('Clone Name', 'Created at', 'Based on', 'Description')
-        for clone in result:
-            print '{:30} \t {:30} \t {:30} \t {:40}'.format(clone['clone_name'], clone['created_at'].strftime('%c %Z'),
-                                                            clone['backup_name'], clone['desc'])
+        if result is None:
+            print 'There are no clones to be listed for {} cluster.'.format(self.cluster_name)
+        else:
+            for clone in result:
+                print 'Clone Name..: {}'.format(clone['clone_name'])
+                print 'Created at..: {}'.format(clone['created_at'].strftime('%Y-%m-%d %H:%M:%S.%f'))
+                print 'Based on....: {}'.format(clone['backup_name'])
+                print 'Description.: {}'.format(clone['desc'])
+                print ''
+
+        # print '{:30} \t {:30} \t {:30} \t {:40}'.format('Clone Name', 'Created at', 'Based on', 'Description')
+        # for clone in result:
+        #     print '{:30} \t {:30} \t {:30} \t {:40}'.format(clone['clone_name'], clone['created_at'].strftime('%c %Z'),
+        #                                                     clone['backup_name'], clone['desc'])
 
 
 class SubCmdRecover:
     def __init__(self, rec_spec=None):
         self.cluster_name = rec_spec['from-cluster-name']
         self.dest_mongodb_uri = rec_spec['dest-mongodb-uri']
-        self.begin_from = rec_spec['begin-from']
-        self.until = rec_spec['until']
+        self.from_date = rec_spec['from-date']
+        self.until_date = rec_spec['until-date']
         self.arch_repo_name = rec_spec['arch-repo-name']
         self.arch_repo_uri = rec_spec['arch-repo-uri']
         self.temp_coll = 'temp_' + self.cluster_name + '_' + str(int(time()))
+        if 'skip_op_cfg' in rec_spec:
+            self.skip_op = rec_spec['skip_op_cfg']
+
         if (mp.cpu_count()/2)-1 == 0:
             self.num_consumers = 1
         else:
@@ -1678,16 +1700,14 @@ class SubCmdRecover:
 
         # Recover Producer instance
         atd = ArchTempData(arch_repo_uri=self.arch_repo_uri, arch_repo_name=self.arch_repo_name,
-                           source_cluster_name=self.cluster_name, begin_from=self.begin_from, upto=self.until,
+                           source_cluster_name=self.cluster_name, begin_from=self.from_date, upto=self.until_date,
                            temp_coll=self.temp_coll, arch_queue=recover_queue)
 
         # Create a temporary collection containing the data that will be added back to the databases
         atd.create_temp_data()
 
         # Create a process to read temp data and insert in the queue
-        atd_proc = mp.Process(target=atd.read_temp_data)
-        atd_proc.start()
-        atd_proc.join()
+        atd.read_temp_data()
 
         # prepare the list of consumer instances
         consumers = list()
@@ -1782,3 +1802,104 @@ class SubCmdArchiver:
 
             if proc.name() == 'python' and self.arch_spec['archiver_name'] in proc.cmdline():
                 return True
+
+
+class SubCmdOperations:
+    def __init__(self, catalog_sess=None):
+        self.catalog = catalog_sess
+
+    def get_first_and_last_ops_per_coll(self, cluster_name=None):
+        # Aggregation query to list the first and last operation grouped by database
+        pipeline = [
+            {'$sort': {'created_at': 1}},
+            {'$group': {'_id': {'dbname':'$ns.db', 'collname':'$ns.coll'},
+                        'firstOperation': {'$first': '$created_at'},
+                        'lastOperation': {'$last': '$created_at'}
+                        }
+            },
+            {'$sort': {'firstOperation': 1}}
+        ]
+
+        aggr_ops = self.catalog.run_aggregation(coll_name=cluster_name, aggr_pipeline=pipeline)
+        return aggr_ops
+
+    def get_first_and_last_ops_cluster(self, cluster_name=None):
+        # Aggregation query to list the first and last operation for the whole cluster
+        pipeline = [
+            {'$sort': {'created_at': 1}},
+            {'$group': {'_id': 'cluster',
+                        'firstOperation': {'$first': '$created_at'},
+                        'lastOperation': {'$last': '$created_at'}
+                        }
+            },
+            {'$sort': {'firstOperation': 1}}
+        ]
+
+        aggr_ops = self.catalog.run_aggregation(coll_name=cluster_name, aggr_pipeline=pipeline)
+        return aggr_ops
+
+    def get_ops_per_type(self, cluster_name=None, from_date=None, until_date=None):
+        # Aggregation query to list operations per type/database/coll
+        pipeline = [
+            {
+                '$match': {
+                    '$and': [
+                        {'created_at': {'$gte': from_date}},
+                        {'created_at': {'$lte': until_date}}
+                    ]
+                }
+            },
+            {
+                '$group': {
+                    '_id': {'dbname': '$ns.db', 'collname': '$ns.coll', 'op_type': '$operationType'},
+                    'totalOps': {'$sum': 1}
+                }
+            },
+            {
+                '$project': {
+                    '_id': 0,
+                    'dbname': '$_id.dbname',
+                    'collname': '$_id.collname',
+                    'op_type': '$_id.op_type',
+                    'totalOps': 1
+                }
+            },
+            {
+                '$group': {
+                    '_id': {'dbname': '$dbname', 'collname': '$collname'},
+                    'per_type': {
+                        '$push': {'op_type': '$op_type', 'totalOps': '$totalOps'}
+                    }
+                }
+            },
+            {'$sort': {'_id': 1, 'per_type.op_type': 1}}
+        ]
+
+        aggr_ops = self.catalog.run_aggregation(coll_name=cluster_name, aggr_pipeline=pipeline)
+        return aggr_ops
+
+    def get_total_ops_per_collection(self, cluster_name=None, from_date=None, until_date=None):
+        # Aggregation query to count all operations per database/coll
+        pipeline = [
+            {
+                '$match': {
+                    'created_at': {'$gte': from_date},
+                    'created_at': {'$lte': until_date}
+                }
+            },
+            {
+                '$group': {
+                    '_id': {'dbname': '$ns.db', 'collname': '$ns.coll', 'op_type': '$operationType'},
+                    'totalOps': {'$sum': 1}
+                }
+            },
+            {
+                '$group': {
+                    '_id': {'dbname':'$_id.dbname', 'collname': '$_id.collname'},
+                    'totalCollOps': { '$sum': '$totalOps'}
+                }
+            }
+        ]
+
+        aggr_ops = self.catalog.run_aggregation(coll_name=cluster_name, aggr_pipeline=pipeline)
+        return aggr_ops

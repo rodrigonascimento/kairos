@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 
 
 import json
@@ -9,10 +9,13 @@ from time import sleep
 from kairoslib.catalog import Catalog
 from kairoslib.ontap import ClusterSession, Snapshot
 
+LOGGER = logging.getLogger(__name__)
+
 def load_config_file(config_file=None):
     with open(config_file, 'r') as cfgfile:
         kconfig = json.load(cfgfile)
         return kconfig
+
 
 class Backup_Grim_Reaper:
     def __init__(self, catalog_sess=None, check_interval=None):
@@ -70,27 +73,31 @@ class Backup_Grim_Reaper:
                         snapshot = Snapshot(snap_spec)
                         delete_result = snapshot.delete(svm=cs_svm)
                         if delete_result[0] == 'passed':
-                            logging.info('Snapshot {} on volume {} has been deleted for cluster {}.'.format(snap_spec['snapname'],
+                            LOGGER.info('Snapshot {} on volume {} has been deleted for cluster {}.'.format(snap_spec['snapname'],
                                                                                                             snap_spec['volume'],
                                                                                                             backup['cluster_name']
                                                                                                             ))
                         else:
-                            logging.error('Failed to delete snapshot {} on volume for cluster {}.'.format(snap_spec['snapname'],
+                            LOGGER.error('Failed to delete snapshot {} on volume for cluster {}.'.format(snap_spec['snapname'],
                                                                                                             snap_spec['volume'],
                                                                                                             backup['cluster_name']
                                                                                                             ))
                 remove_from_catalog = self.catalog.remove_one(coll_name='backups', query={'backup_name': backup['backup_name']})
                 if remove_from_catalog > 0:
-                    logging.info('Backup {} for cluster {} has been deleted successfuly.'.format(backup['backup_name'],
+                    LOGGER.info('Backup {} for cluster {} has been deleted successfuly.'.format(backup['backup_name'],
                                                                                                  backup['cluster_name']
                                                                                                  ))
                 else:
-                    logging.error('Failed to remove backup {} for cluster {} from kairos catalog.'.format(backup['backup_name'],
+                    LOGGER.error('Failed to remove backup {} for cluster {} from kairos catalog.'.format(backup['backup_name'],
                                                                                                           backup['cluster_name']
                                                                                                           ))
 
 
 class AppBackupGrimReaper():
+
+    logging.basicConfig(format='%(asctime)s :: %(levelname)s :: %(message)s', level=logging.INFO,
+                        handlers=[logging.FileHandler(filename='bkp_grim_reaper.log'), logging.StreamHandler()])
+
     def __init__(self):
         self.stdin_path, self.stdout_path, self.stderr_path = ('/dev/null', '/dev/tty', '/dev/tty')
         self.pidfile_path = '/tmp/.bkpgrimreaper.pid'
@@ -98,9 +105,6 @@ class AppBackupGrimReaper():
         self.kcfg = load_config_file(config_file='kairos.json')
 
     def run(self):
-        logging.basicConfig(format='%(asctime)s :: %(levelname)s :: %(message)s', level=logging.INFO,
-                            handlers=[logging.FileHandler(filename='bkp_grim_reaper.log'), logging.StreamHandler()])
-
         catalog = Catalog(repo_uri=self.kcfg['kairos-repo']['repo-uri'], repo_name=self.kcfg['kairos-repo']['db-name'])
         catalog.connect()
 
@@ -110,10 +114,12 @@ class AppBackupGrimReaper():
             bgr.delete_expired_backups(expired_backups=bgr.check_expired_backups())
             sleep(bgr.check_interval)
 
+
 def main():
     appBGR = AppBackupGrimReaper()
     py_daemon = runner.DaemonRunner(appBGR)
     py_daemon.do_action()
+
 
 if __name__ == '__main__':
     main()

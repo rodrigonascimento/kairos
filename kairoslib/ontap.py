@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 """ONTAP Module :: Connect and execute admin tasks on FAS and AFF systems
 """
 

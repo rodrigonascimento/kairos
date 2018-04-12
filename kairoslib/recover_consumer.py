@@ -4,14 +4,13 @@ import logging
 import pymongo
 import pymongo.errors
 import multiprocessing as mp
-from time import time
-from kairoslib.catalog import Catalog
 
 LOGGER = logging.getLogger(__name__)
 
 
 class RecoverConsumer(mp.Process):
     def __init__(self, arch_queue=None, dest_cluster_uri=None):
+        mp.Process.__init__(self)
         self.dest_cluster = dest_cluster_uri
         self.arch_queue = arch_queue
         self.conn = None
@@ -20,10 +19,10 @@ class RecoverConsumer(mp.Process):
         # While using multiprocessing, pymongo doesn't recommend to open up a connection before a fork.
         # Opening a connection after fork
         try:
-           self.conn = pymongo.MongoClient(self.dest_cluster)
+            self.conn = pymongo.MongoClient(self.dest_cluster)
         except pymongo.errors.ConnectionFailure, e:
-           LOGGER.error(e)
-           exit(1)
+            LOGGER.error(e)
+            exit(1)
         while not self.arch_queue.empty():
             # Get a document from the queue
             recover_doc = self.arch_queue.get()
@@ -36,7 +35,10 @@ class RecoverConsumer(mp.Process):
 
             # Perform the operation according to the op_type specified in the recover document
             if recover_doc['lastOp']['op_type'] == 'insert':
-                coll.insert_one(document=recover_doc['lastOp']['full_doc'])
+                try:
+                    coll.insert_one(document=recover_doc['lastOp']['full_doc'])
+                except pymongo.errors.DuplicateKeyError, e:
+                    LOGGER.debug(e)
             elif recover_doc['lastOp']['op_type'] == 'update':
                 coll.replace_one(filter={'_id': recover_doc['lastOp']['full_doc']['_id']},
                                  replacement=recover_doc['lastOp']['full_doc'], upsert=True)
